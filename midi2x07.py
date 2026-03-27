@@ -284,6 +284,7 @@ def reduce_to_mono(
     tempo_points: list[TempoPoint],
     tempo_ticks: list[int],
     priority: str,
+    preferred_tracks: set[int] | None = None,
 ) -> list[tuple[int, int, int | None]]:
     if not notes:
         return []
@@ -311,7 +312,7 @@ def reduce_to_mono(
         if time_us > cursor_us:
             chosen = None
             if active:
-                chosen_note = choose_active_note(list(active.values()), priority)
+                chosen_note = choose_active_note(list(active.values()), priority, preferred_tracks)
                 chosen = chosen_note.note
             spans.append((cursor_us, time_us, chosen))
             cursor_us = time_us
@@ -330,7 +331,12 @@ def reduce_to_mono(
     return spans
 
 
-def choose_active_note(active_notes: list[MidiNote], priority: str) -> MidiNote:
+def choose_active_note(active_notes: list[MidiNote], priority: str, preferred_tracks: set[int] | None = None) -> MidiNote:
+    if preferred_tracks:
+        preferred_notes = [item for item in active_notes if item.track in preferred_tracks]
+        if preferred_notes:
+            active_notes = preferred_notes
+
     if priority == "highest":
         return max(active_notes, key=lambda item: (item.note, item.velocity, -item.track, item.start_tick))
 
@@ -855,6 +861,25 @@ def build_report(
     return lines
 
 
+def print_track_list(notes: list[MidiNote], track_names: list[str]) -> None:
+    by_track: dict[int, list[MidiNote]] = {}
+    for note in notes:
+        by_track.setdefault(note.track, []).append(note)
+
+    for track_index, track_name in enumerate(track_names):
+        track_notes = by_track.get(track_index, [])
+        if not track_notes:
+            print(f"{track_index}: {track_name} | notes=0")
+            continue
+
+        channels = ",".join(str(channel + 1) for channel in sorted({note.channel for note in track_notes}))
+        note_min = min(note.note for note in track_notes)
+        note_max = max(note.note for note in track_notes)
+        print(
+            f"{track_index}: {track_name} | notes={len(track_notes)} | channels={channels} | range={note_min}..{note_max}"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Convert a MIDI file into compact monophonic music data for the Canon X-07."
@@ -862,6 +887,8 @@ def main() -> int:
     parser.add_argument("input_midi", help="Path to the source MIDI file.")
     parser.add_argument("-o", "--output", help="Output .inc/.asm file (default: music_data.inc).")
     parser.add_argument("--bin-output", help="Optional raw binary output file.")
+    parser.add_argument("--list-tracks", action="store_true",
+                        help="List MIDI tracks with note counts, channels and note ranges, then exit.")
     parser.add_argument("--format", choices=("auto", "pair8", "packed4"), default="auto",
                         help="Output format. auto selects the smallest one.")
     parser.add_argument("--unit-ms", type=int, default=100,
@@ -892,8 +919,14 @@ def main() -> int:
                         help="Duration of drum pulses added by --x07-groove.")
     parser.add_argument("--track", type=int, action="append",
                         help="Keep only this MIDI track (0-based index). Repeatable.")
+    parser.add_argument("--prefer-track", type=int, action="append",
+                        help="Prefer this MIDI track when several notes overlap. Repeatable.")
+    parser.add_argument("--exclude-track", type=int, action="append",
+                        help="Exclude this MIDI track (0-based index). Repeatable.")
     parser.add_argument("--channel", type=int, action="append",
                         help="Keep only this MIDI channel (1..16). Repeatable.")
+    parser.add_argument("--exclude-channel", type=int, action="append",
+                        help="Exclude this MIDI channel (1..16). Repeatable.")
     parser.add_argument("--include-drums", action="store_true",
                         help="Include channel 10 drums. With --x07-groove, drum events are converted to simplified pulses.")
     parser.add_argument("--priority", choices=("highest", "newest", "melody"), default="highest",
@@ -930,13 +963,23 @@ def main() -> int:
         print(f"MIDI error: {exc}", file=sys.stderr)
         return 1
 
+    if args.list_tracks:
+        print_track_list(notes, track_names)
+        return 0
+
     if args.track:
         track_filter = set(args.track)
         notes = [note for note in notes if note.track in track_filter]
+    if args.exclude_track:
+        excluded_tracks = set(args.exclude_track)
+        notes = [note for note in notes if note.track not in excluded_tracks]
 
     if args.channel:
         channel_filter = {channel - 1 for channel in args.channel}
         notes = [note for note in notes if note.channel in channel_filter]
+    if args.exclude_channel:
+        excluded_channels = {channel - 1 for channel in args.exclude_channel}
+        notes = [note for note in notes if note.channel not in excluded_channels]
 
     drum_notes = [note for note in notes if note.channel == 9]
     music_notes = [note for note in notes if note.channel != 9]
@@ -959,7 +1002,15 @@ def main() -> int:
         return 1
 
     tempo_points, tempo_ticks = build_tempo_map(ticks_per_beat, tempo_events)
-    spans = reduce_to_mono(notes_for_mono, ticks_per_beat, tempo_points, tempo_ticks, args.priority)
+    preferred_tracks = set(args.prefer_track or [])
+    spans = reduce_to_mono(
+        notes_for_mono,
+        ticks_per_beat,
+        tempo_points,
+        tempo_ticks,
+        args.priority,
+        preferred_tracks=preferred_tracks,
+    )
 
     if args.transpose is None:
         transpose = choose_auto_transpose([note.note for note in notes_for_mono])
