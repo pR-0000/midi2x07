@@ -1,0 +1,836 @@
+; ------------------------------------------------------------
+; midi2x07_irq.z80
+; Demo player for MUSIC_DRIVER_IRQ data (custom interrupt driver)
+; ------------------------------------------------------------
+
+	include "canon_x07.inc"
+
+	.org $2000
+
+	jp start
+
+	include "music_data.inc"
+
+BUZZER_MODE_RUN		equ F4_SETBC|F4_BRGST|F4_MD1|F4_MD0
+BUZZER_MODE_ON		equ BUZZER_MODE_RUN|F4_BZON
+IRQ_ACK_BAUD		equ $10
+VECTOR_JP		equ $C3
+ANIM_FRAME_STEP		equ 24
+MUSIC_SPEED_INDEX_MIN	equ 0
+MUSIC_SPEED_INDEX_MAX	equ 2
+MUSIC_SPEED_INDEX_DEFAULT	equ 1
+MUSIC_SPEED_DIV_SLOW equ 4
+MUSIC_SPEED_DIV_NORMAL equ 2
+MUSIC_SPEED_DIV_FAST	equ 1
+MUSIC_SPEED_STEP_SLOW	equ 1
+MUSIC_SPEED_STEP_NORMAL	equ 1
+MUSIC_SPEED_STEP_FAST equ 1
+
+	IF MUSIC_DATA_DRIVER != MUSIC_DRIVER_IRQ
+		.error "midi2x07_irq.z80 only supports MUSIC_DRIVER_IRQ data"
+	ENDIF
+
+	IF MUSIC_DATA_FORMAT != MUSIC_FORMAT_PAIR8
+		IF MUSIC_DATA_FORMAT != MUSIC_FORMAT_PACKED4
+			.error "Unsupported MUSIC_DATA_FORMAT in music_data.inc"
+		ENDIF
+	ENDIF
+
+start:
+	di
+	call ROM_LCD_CLS
+	ld a,T6834_CMD_CLICK_OFF
+	call ROM_T6834_CMD
+	ld a,T6834_CMD_CPUKEY_OUT_OFF
+	call ROM_T6834_CMD
+	ld a,T6834_CMD_KEYBUF_CLEAR
+	call ROM_T6834_CMD
+	call clear_breakflag
+	call irq_anim_reset
+	call music_draw_ui
+	call irq_driver_install
+	xor a
+	ld (music_paused),a
+	ld (music_prev_f6),a
+	ld (music_prev_left),a
+	ld (music_prev_right),a
+	ld (music_prev_up),a
+	ld (music_prev_down),a
+	ld (music_note),a
+	ld hl,0
+	ld (irq_ticks),hl
+	ld (music_speed_accum),a
+	inc a
+	ld (anim_enabled),a
+	ld a,MUSIC_SPEED_INDEX_DEFAULT
+	ld (music_speed_index),a
+	call music_apply_speed
+	call music_draw_status_playing
+	call music_restart
+	ei
+
+main:
+	call clear_breakflag
+	call music_poll_controls
+	or a
+	jr nz,quit
+	call clear_breakflag
+	call irq_anim_update
+	jr main
+
+quit:
+	di
+	call irq_player_stop
+	call irq_driver_restore
+	call irq_anim_clear
+	call clear_breakflag
+	ld a,T6834_CMD_KEYBUF_CLEAR
+	call ROM_T6834_CMD
+	ld a,T6834_CMD_CPUKEY_OUT_ON
+	call ROM_T6834_CMD
+	ld a,T6834_CMD_CLICK_ON
+	call ROM_T6834_CMD
+	call clear_breakflag
+	ret
+
+clear_breakflag:
+	xor a
+	ld (SYS_BREAKFLAG),a
+	ret
+
+music_draw_ui:
+	ld hl,msg_title
+	ld a,msg_title_len
+	ld e,1
+	call music_print_centered
+	ld hl,music_data_name
+	ld d,1
+	ld e,2
+	ld (SYS_CURSOR_XY),de
+	call ROM_MSG_DISPLAY_NOSTR
+	ld hl,music_data_size_text
+	ld a,21
+	sub MUSIC_DATA_SIZE_TEXT_LEN
+	ld d,a
+	ld e,3
+	ld (SYS_CURSOR_XY),de
+	call ROM_MSG_DISPLAY_NOSTR
+	call music_draw_speed
+	jp irq_anim_draw
+
+music_print_centered:
+	ld d,a
+	ld a,22
+	sub d
+	srl a
+	ld d,a
+	ld (SYS_CURSOR_XY),de
+	jp ROM_MSG_DISPLAY_NOSTR
+
+music_draw_status_playing:
+	call music_clear_line_4
+	ld hl,msg_playing
+	ld a,msg_playing_len
+	ld e,4
+	jp music_print_centered
+
+music_draw_status_paused:
+	call music_clear_line_4
+	ld hl,msg_paused
+	ld a,msg_paused_len
+	ld e,4
+	jp music_print_centered
+
+music_clear_line_4:
+	ld a,T6834_CMD_LINE_CLEAR
+	ld hl,param_line_clear_4
+	ld bc,$0100
+	ld de,SYS_T6834_REPLYBUF
+	jp ROM_T6834_CMD_PARAM
+
+music_poll_controls:
+	call music_poll_quit
+	or a
+	ret nz
+	call music_poll_f6
+	call music_poll_stick
+	xor a
+	ret
+
+music_poll_quit:
+	ld a,T6834_CMD_STRIG1|$80
+	ld hl,0
+	ld bc,$0001
+	ld de,SYS_T6834_REPLYBUF
+	call ROM_T6834_CMD_PARAM
+	ld a,(SYS_T6834_REPLYBUF)
+	cp $00
+	jr z,music_poll_quit_pressed
+	xor a
+	ret
+
+music_poll_quit_pressed:
+	ld a,1
+	ret
+
+music_poll_f6:
+	ld a,T6834_CMD_TEST_KEY
+	ld hl,param_check_f6
+	ld bc,$0201
+	ld de,SYS_T6834_REPLYBUF
+	call ROM_T6834_CMD_PARAM
+	ld a,(SYS_T6834_REPLYBUF)
+	bit 5,a
+	jr z,music_poll_f6_released
+	ld a,(music_prev_f6)
+	or a
+	ret nz
+	ld a,1
+	ld (music_prev_f6),a
+	jp music_toggle_pause
+
+music_poll_f6_released:
+	xor a
+	ld (music_prev_f6),a
+	ret
+
+music_poll_stick:
+	ld a,T6834_STICK_CMD
+	ld bc,$0001
+	ld de,SYS_T6834_REPLYBUF
+	call ROM_T6834_CMD_PARAM
+	ld a,(SYS_T6834_REPLYBUF)
+	ld b,a
+	cp T6834_STICK_LEFT
+	jr z,music_poll_left_pressed
+	xor a
+	ld (music_prev_left),a
+	jr music_poll_right
+
+music_poll_left_pressed:
+	ld a,(music_prev_left)
+	or a
+	jr nz,music_poll_up
+	ld a,1
+	ld (music_prev_left),a
+	jp music_restart
+
+music_poll_right:
+	ld a,b
+	cp T6834_STICK_RIGHT
+	jr z,music_poll_right_pressed
+	xor a
+	ld (music_prev_right),a
+	jr music_poll_up
+
+music_poll_right_pressed:
+	ld a,(music_prev_right)
+	or a
+	jr nz,music_poll_up
+	ld a,1
+	ld (music_prev_right),a
+	call irq_anim_toggle
+
+music_poll_up:
+	ld a,b
+	cp T6834_STICK_UP
+	jr z,music_poll_up_pressed
+	xor a
+	ld (music_prev_up),a
+	jr music_poll_down
+
+music_poll_up_pressed:
+	ld a,(music_prev_up)
+	or a
+	jr nz,music_poll_down
+	ld a,1
+	ld (music_prev_up),a
+	call music_speed_up
+
+music_poll_down:
+	ld a,b
+	cp T6834_STICK_DOWN
+	jr z,music_poll_down_pressed
+	xor a
+	ld (music_prev_down),a
+	ret
+
+music_poll_down_pressed:
+	ld a,(music_prev_down)
+	or a
+	ret nz
+	ld a,1
+	ld (music_prev_down),a
+	jp music_speed_down
+
+music_toggle_pause:
+	ld a,(music_paused)
+	or a
+	jr z,music_pause
+	xor a
+	ld (music_paused),a
+	call music_draw_status_playing
+	jp irq_player_resume
+
+music_pause:
+	ld a,1
+	ld (music_paused),a
+	call irq_player_pause
+	jp music_draw_status_paused
+
+music_restart:
+	call irq_player_pause
+	ld hl,music_data
+	ld (music_ptr),hl
+	ld (music_loop_ptr),hl
+	xor a
+	ld (music_note),a
+	ld (music_speed_accum),a
+	ld hl,0
+	ld (irq_ticks),hl
+	ld a,(music_paused)
+	or a
+	ret nz
+	jp irq_player_load_next
+
+music_speed_up:
+	ld a,(music_speed_index)
+	cp MUSIC_SPEED_INDEX_MAX
+	ret z
+	inc a
+	ld (music_speed_index),a
+	jp music_apply_speed
+
+music_speed_down:
+	ld a,(music_speed_index)
+	cp MUSIC_SPEED_INDEX_MIN
+	ret z
+	dec a
+	ld (music_speed_index),a
+	jp music_apply_speed
+
+music_apply_speed:
+	ld a,(music_speed_index)
+	ld l,a
+	ld h,0
+	push hl
+	ld de,speed_div_table
+	add hl,de
+	ld a,(hl)
+	ld (music_speed_div),a
+	pop hl
+	ld de,speed_step_table
+	add hl,de
+	ld a,(hl)
+	ld (music_speed_step),a
+	xor a
+	ld (music_speed_accum),a
+	jp music_draw_speed
+
+music_draw_speed:
+	ld a,(music_speed_index)
+	add a,a
+	ld l,a
+	ld h,0
+	ld de,speed_label_table
+	add hl,de
+	ld e,(hl)
+	inc hl
+	ld d,(hl)
+	ex de,hl
+	ld d,18
+	ld e,1
+	ld (SYS_CURSOR_XY),de
+	jp ROM_MSG_DISPLAY_NOSTR
+
+irq_anim_toggle:
+	ld a,(anim_enabled)
+	xor 1
+	ld (anim_enabled),a
+	or a
+	jp z,irq_anim_clear
+	jp irq_anim_draw
+
+irq_driver_install:
+	ld a,(SYS_INT_SERIAL)
+	ld (saved_serial_vector+0),a
+	ld hl,(SYS_INT_SERIAL+1)
+	ld (saved_serial_vector+1),hl
+	ld a,(SYS_INTIMAG)
+	ld (saved_intimag),a
+	in a,(IOP_F4_MODE)
+	ld (saved_f4_mode),a
+
+	ld a,VECTOR_JP
+	ld (SYS_INT_SERIAL),a
+	ld hl,irq_serial_handler
+	ld (SYS_INT_SERIAL+1),hl
+	ret
+
+irq_driver_restore:
+	ld a,(saved_intimag)
+	ld (SYS_INTIMAG),a
+	out (IOP_F0_INTCTRL),a
+	ld a,(saved_f4_mode)
+	out (IOP_F4_MODE),a
+
+	ld a,(saved_serial_vector+0)
+	ld (SYS_INT_SERIAL),a
+	ld hl,(saved_serial_vector+1)
+	ld (SYS_INT_SERIAL+1),hl
+	ret
+
+irq_player_pause:
+	ld a,(SYS_INTIMAG)
+	and $DF
+	ld (SYS_INTIMAG),a
+	out (IOP_F0_INTCTRL),a
+	ld a,(saved_f4_mode)
+	out (IOP_F4_MODE),a
+	ld a,IRQ_ACK_BAUD
+	out (IOP_F5_INTRESET),a
+	ret
+
+irq_player_stop:
+	call irq_player_pause
+	ld hl,0
+	ld (irq_ticks),hl
+	ld ($000E),hl
+	xor a
+	ld (MEV_BUZZER_CNT),a
+	ld (music_note),a
+	ld (music_note_active),a
+	ret
+
+irq_player_resume:
+	ld a,(music_note)
+	or a
+	jr z,irq_player_resume_rest_or_load
+	ld hl,(irq_ticks)
+	ld a,h
+	or l
+	jr z,irq_player_load_next
+	jp irq_player_program_current
+
+irq_player_resume_rest_or_load:
+	ld hl,(irq_ticks)
+	ld a,h
+	or l
+	jr z,irq_player_load_next
+	jp irq_player_program_current
+
+irq_player_load_next:
+	ld hl,(music_ptr)
+
+	IF MUSIC_DATA_FORMAT = MUSIC_FORMAT_PAIR8
+
+irq_player_read_event:
+	ld a,(hl)
+	cp $FF
+	jr z,irq_player_loop_restart
+	inc hl
+	ld e,(hl)
+	inc hl
+	ld d,0
+	ld (music_ptr),hl
+	jr irq_player_store_event
+
+	ELSE
+
+irq_player_read_event:
+	ld a,(hl)
+	inc hl
+	cp $FF
+	jr z,irq_player_loop_restart
+	cp $FC
+	jr z,irq_player_read_long8
+	cp $FD
+	jr z,irq_player_read_long16
+
+	ld b,1
+	cp 49
+	jr c,irq_player_short_done
+	sub 49
+	ld b,2
+	cp 49
+	jr c,irq_player_short_done
+	sub 49
+	ld b,4
+	cp 49
+	jr c,irq_player_short_done
+	sub 49
+	ld b,8
+
+irq_player_short_done:
+	ld e,b
+	ld d,0
+	ld (music_ptr),hl
+	jr irq_player_store_event
+
+irq_player_read_long8:
+	ld a,(hl)
+	inc hl
+	ld e,(hl)
+	inc hl
+	ld d,0
+	ld (music_ptr),hl
+	jr irq_player_store_event
+
+irq_player_read_long16:
+	ld a,(hl)
+	inc hl
+	ld e,(hl)
+	inc hl
+	ld d,(hl)
+	inc hl
+	ld (music_ptr),hl
+	jr irq_player_store_event
+
+	ENDIF
+
+irq_player_loop_restart:
+	ld hl,(music_loop_ptr)
+	ld (music_ptr),hl
+	jr irq_player_read_event
+
+irq_player_store_event:
+	ld (music_note),a
+	ex de,hl
+	ld (irq_ticks),hl
+	jp irq_player_program_current
+
+irq_player_program_current:
+	ld a,(music_note)
+	or a
+	jr z,irq_player_program_rest
+	dec a
+	add a,a
+	ld l,a
+	ld h,0
+	ld de,music_pitch_table
+	add hl,de
+	ld e,(hl)
+	inc hl
+	ld d,(hl)
+	ld a,1
+	ld (music_note_active),a
+	jr irq_player_program_divisor
+
+irq_player_program_rest:
+	ld de,MUSIC_DATA_IRQ_REST_DIVISOR
+	xor a
+	ld (music_note_active),a
+
+irq_player_program_divisor:
+	ld a,(SYS_INTIMAG)
+	and $DF
+	ld (SYS_INTIMAG),a
+	out (IOP_F0_INTCTRL),a
+
+	ld a,e
+	out (IOP_F2_BAUD_L_FLAGS),a
+	ld a,d
+	out (IOP_F3_BAUD_H),a
+	ld a,(music_note_active)
+	or a
+	ld a,BUZZER_MODE_RUN
+	jr z,irq_player_program_mode
+	ld a,BUZZER_MODE_ON
+
+irq_player_program_mode:
+	out (IOP_F4_MODE),a
+	ld a,(SYS_INTIMAG)
+	or F0_BIE
+	ld (SYS_INTIMAG),a
+	out (IOP_F0_INTCTRL),a
+	ld a,IRQ_ACK_BAUD
+	out (IOP_F5_INTRESET),a
+	ret
+
+irq_serial_handler:
+	push af
+	push bc
+	push de
+	push hl
+	push ix
+	push iy
+	exx
+	ex af,af'
+	push af
+	push bc
+	push de
+	push hl
+
+	in a,(IOP_F2_BAUD_L_FLAGS)
+	and F2R_BG1
+	jr z,irq_serial_chain
+
+	ld a,(anim_tick_accum)
+	inc a
+	ld (anim_tick_accum),a
+	ld a,(music_speed_accum)
+	inc a
+	ld (music_speed_accum),a
+	ld b,a
+	ld a,(music_speed_div)
+	cp b
+	jr nz,irq_serial_ack
+	xor a
+	ld (music_speed_accum),a
+	ld hl,(irq_ticks)
+	ld a,(music_speed_step)
+	ld b,a
+irq_serial_step_loop:
+	ld a,h
+	or l
+	jr z,irq_serial_load_next
+	dec hl
+	djnz irq_serial_step_loop
+	ld (irq_ticks),hl
+	ld a,h
+	or l
+	jr nz,irq_serial_ack
+irq_serial_load_next:
+	ld (irq_ticks),hl
+	call irq_player_load_next
+
+irq_serial_ack:
+	ld a,IRQ_ACK_BAUD
+	out (IOP_F5_INTRESET),a
+	pop hl
+	pop de
+	pop bc
+	pop af
+	ex af,af'
+	exx
+	pop iy
+	pop ix
+	pop hl
+	pop de
+	pop bc
+	pop af
+	ei
+	ret
+
+irq_serial_chain:
+	pop hl
+	pop de
+	pop bc
+	pop af
+	ex af,af'
+	exx
+	pop iy
+	pop ix
+	pop hl
+	pop de
+	pop bc
+	pop af
+	ld hl,(saved_serial_vector+1)
+	jp (hl)
+
+irq_anim_reset:
+	xor a
+	ld (anim_state),a
+	ld (anim_tick_accum),a
+	jp irq_anim_draw
+
+
+irq_anim_update:
+	ld a,(anim_enabled)
+	or a
+	ret z
+	ld a,(anim_tick_accum)
+	cp ANIM_FRAME_STEP
+	ret c
+	sub ANIM_FRAME_STEP
+	ld (anim_tick_accum),a
+	ld a,(anim_state)
+	inc a
+	and $0F
+	ld (anim_state),a
+	jp irq_anim_apply_state_delta
+irq_anim_draw:
+	ld a,(anim_enabled)
+	or a
+	jr z,irq_anim_clear
+	ld a,(anim_state)
+	add a,a
+	add a,a
+	add a,a
+	ld e,a
+	ld d,0
+	ld ix,anim_frames
+	add ix,de
+	jp draw_sprite8_top_left_ix
+
+irq_anim_clear:
+	ld ix,anim_blank
+	jp draw_sprite8_top_left_ix
+
+irq_anim_apply_state_delta:
+	ld a,(anim_state)
+	cp 8
+	jr c,irq_anim_delta_clear
+	sub 8
+    ld d,$FF
+	jr irq_anim_delta_row
+
+irq_anim_delta_clear:
+    ld d,$00
+
+irq_anim_delta_row:
+	add a,a
+	add a,a
+	add a,a
+	add a,a
+	ld l,a
+	ld h,0
+	ld bc,MEV_SCREEN
+	add hl,bc
+	jp x_ram_write
+
+draw_sprite8_top_left_ix:
+	ld hl,MEV_SCREEN
+	ld b,8
+
+draw_sprite8_top_left_ix_row:
+	ld a,(ix)
+	inc ix
+	ld d,a
+	call x_ram_write
+	ld de,16
+	add hl,de
+	djnz draw_sprite8_top_left_ix_row
+	ret
+
+; ------------------------------------------------------------
+; x_ram_write
+; In : HL = addr, D = data
+; Order validated: CMD, DATA, ADDR_L, ADDR_H
+; ------------------------------------------------------------
+
+x_ram_write:
+	di
+	ld e,T6834_CMD_RAM_WRITE
+	call send_t6834_e
+	ld e,d
+	call send_t6834_e
+	ld e,l
+	call send_t6834_e
+	ld e,h
+	call send_t6834_e
+	ei
+	ret
+
+send_t6834_e:
+	in a,(IOP_F2_BAUD_L_FLAGS)
+	and %00000010
+	jr z,send_t6834_e
+	ld a,(SYS_INTIMAG)
+	or $80
+	out (IOP_F0_INTCTRL),a
+	ld a,e
+	out (IOP_F1_XBTR_XBRR),a
+	ld a,$02
+	out (IOP_F5_INTRESET),a
+	ret
+
+saved_serial_vector:
+	.db 0,0,0
+
+saved_intimag:
+	.db 0
+
+saved_f4_mode:
+	.db 0
+
+music_ptr:
+	.dw 0
+music_loop_ptr:
+	.dw 0
+irq_ticks:
+	.dw 0
+music_note:
+	.db 0
+music_note_active:
+	.db 0
+music_paused:
+	.db 0
+music_prev_f6:
+	.db 0
+music_prev_left:
+	.db 0
+music_prev_right:
+	.db 0
+music_prev_up:
+	.db 0
+music_prev_down:
+	.db 0
+music_speed_index:
+	.db MUSIC_SPEED_INDEX_DEFAULT
+music_speed_div:
+	.db MUSIC_SPEED_DIV_NORMAL
+music_speed_accum:
+	.db 0
+music_speed_step:
+	.db MUSIC_SPEED_STEP_NORMAL
+anim_state:
+	.db 0
+anim_tick_accum:
+	.db 0
+anim_enabled:
+	.db 1
+
+param_check_f6:
+	.db $00,$20
+param_line_clear_4:
+	.db 3
+
+msg_title:
+	.db "midi2x07 irq",0
+msg_title_len	equ 12
+msg_playing:
+	.db "- Playing -",0
+msg_playing_len	equ 11
+msg_paused:
+	.db "- Paused -",0
+msg_paused_len	equ 10
+
+speed_div_table:
+	.db MUSIC_SPEED_DIV_SLOW,MUSIC_SPEED_DIV_NORMAL,MUSIC_SPEED_DIV_FAST
+
+speed_step_table:
+	.db MUSIC_SPEED_STEP_SLOW,MUSIC_SPEED_STEP_NORMAL,MUSIC_SPEED_STEP_FAST
+
+speed_label_table:
+	.dw msg_speed_half,msg_speed_normal,msg_speed_fast
+
+msg_speed_half:
+	.db "x.5",0
+msg_speed_normal:
+	.db "x1 ",0
+msg_speed_fast:
+	.db "x2 ",0
+
+anim_frames:
+	.db $00,$FF,$FF,$FF,$FF,$FF,$FF,$FF
+	.db $00,$00,$FF,$FF,$FF,$FF,$FF,$FF
+	.db $00,$00,$00,$FF,$FF,$FF,$FF,$FF
+	.db $00,$00,$00,$00,$FF,$FF,$FF,$FF
+	.db $00,$00,$00,$00,$00,$FF,$FF,$FF
+	.db $00,$00,$00,$00,$00,$00,$FF,$FF
+	.db $00,$00,$00,$00,$00,$00,$00,$FF
+	.db $00,$00,$00,$00,$00,$00,$00,$00
+	.db $FF,$00,$00,$00,$00,$00,$00,$00
+	.db $FF,$FF,$00,$00,$00,$00,$00,$00
+	.db $FF,$FF,$FF,$00,$00,$00,$00,$00
+	.db $FF,$FF,$FF,$FF,$00,$00,$00,$00
+	.db $FF,$FF,$FF,$FF,$FF,$00,$00,$00
+	.db $FF,$FF,$FF,$FF,$FF,$FF,$00,$00
+	.db $FF,$FF,$FF,$FF,$FF,$FF,$FF,$00
+	.db $FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF
+
+anim_blank:
+	.db $00,$00,$00,$00,$00,$00,$00,$00
+
+end:

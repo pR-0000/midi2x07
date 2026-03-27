@@ -13,6 +13,9 @@ X07_LOW_MIDI = 60
 X07_HIGH_MIDI = 107
 X07_NOTE_MIN = 1
 X07_NOTE_MAX = 48
+IRQ_LOW_MIDI = 31
+IRQ_HIGH_MIDI = 107
+IRQ_REST_DIVISOR = 960
 SHORT_DURATIONS = (1, 2, 4, 8)
 
 
@@ -236,7 +239,7 @@ def tick_to_us(tick: int, tempo_points: list[TempoPoint], tempo_ticks: list[int]
     return point.start_us + ((tick - point.tick) * point.tempo_us) // ticks_per_beat
 
 
-def choose_auto_transpose(notes: list[int]) -> int:
+def choose_auto_transpose(notes: list[int], low_midi: int, high_midi: int) -> int:
     if not notes:
         return 0
 
@@ -247,12 +250,12 @@ def choose_auto_transpose(notes: list[int]) -> int:
         center_penalty = 0
         for note in notes:
             shifted = note + shift
-            if X07_LOW_MIDI <= shifted <= X07_HIGH_MIDI:
+            if low_midi <= shifted <= high_midi:
                 in_range += 1
-            if shifted < X07_LOW_MIDI:
-                center_penalty += X07_LOW_MIDI - shifted
-            elif shifted > X07_HIGH_MIDI:
-                center_penalty += shifted - X07_HIGH_MIDI
+            if shifted < low_midi:
+                center_penalty += low_midi - shifted
+            elif shifted > high_midi:
+                center_penalty += shifted - high_midi
         score = (in_range, -center_penalty, -abs(shift))
         if best_score is None or score > best_score:
             best_score = score
@@ -260,20 +263,43 @@ def choose_auto_transpose(notes: list[int]) -> int:
     return best_shift
 
 
-def midi_to_x07(note: int, transpose: int, fold_octaves: bool) -> int | None:
+def fold_midi_note(
+    note: int,
+    transpose: int,
+    fold_octaves: bool,
+    low_midi: int,
+    high_midi: int,
+) -> int | None:
     shifted = note + transpose
     if fold_octaves:
-        while shifted < X07_LOW_MIDI:
+        while shifted < low_midi:
             shifted += 12
-        while shifted > X07_HIGH_MIDI:
+        while shifted > high_midi:
             shifted -= 12
-    if shifted < X07_LOW_MIDI or shifted > X07_HIGH_MIDI:
+    if shifted < low_midi or shifted > high_midi:
+        return None
+    return shifted
+
+
+def midi_to_x07(note: int, transpose: int, fold_octaves: bool) -> int | None:
+    shifted = fold_midi_note(note, transpose, fold_octaves, X07_LOW_MIDI, X07_HIGH_MIDI)
+    if shifted is None:
         return None
     return shifted - (X07_LOW_MIDI - 1)
 
 
+def midi_to_irq_note(note: int, transpose: int, fold_octaves: bool) -> int | None:
+    return fold_midi_note(note, transpose, fold_octaves, IRQ_LOW_MIDI, IRQ_HIGH_MIDI)
+
+
 def soften_high_x07_note(note_value: int, max_x07_note: int) -> int:
     while note_value > max_x07_note and note_value - 12 >= X07_NOTE_MIN:
+        note_value -= 12
+    return note_value
+
+
+def soften_high_irq_note(note_value: int, max_irq_midi: int) -> int:
+    while note_value > max_irq_midi and note_value - 12 >= IRQ_LOW_MIDI:
         note_value -= 12
     return note_value
 
@@ -357,6 +383,7 @@ def choose_active_note(active_notes: list[MidiNote], priority: str, preferred_tr
 
 def simplify_events(
     spans: list[tuple[int, int, int | None]],
+    driver: str,
     unit_ms: int,
     min_note_units: int,
     min_rest_units: int,
@@ -365,6 +392,7 @@ def simplify_events(
     transpose: int,
     fold_octaves: bool,
     max_x07_note: int,
+    max_irq_midi: int,
     max_note_units: int,
     retrigger_gap_units: int,
     pseudo_poly: int,
@@ -381,8 +409,12 @@ def simplify_events(
         if midi_note is None:
             note_value = 0
         else:
-            mapped = midi_to_x07(midi_note, transpose, fold_octaves)
-            note_value = 0 if mapped is None else soften_high_x07_note(mapped, max_x07_note)
+            if driver == "irq":
+                mapped = midi_to_irq_note(midi_note, transpose, fold_octaves)
+                note_value = 0 if mapped is None else soften_high_irq_note(mapped, max_irq_midi)
+            else:
+                mapped = midi_to_x07(midi_note, transpose, fold_octaves)
+                note_value = 0 if mapped is None else soften_high_x07_note(mapped, max_x07_note)
 
         if note_value == 0 and duration_units < min_rest_units:
             continue
@@ -416,7 +448,12 @@ def simplify_events(
     events = merge_identical(events)
     events = smooth_events(events, smooth_units)
     events = split_long_notes(events, max_note_units, retrigger_gap_units)
-    events = apply_pseudo_polyphony(events, pseudo_poly, pseudo_poly_step_units)
+    events = apply_pseudo_polyphony(
+        events,
+        pseudo_poly,
+        pseudo_poly_step_units,
+        IRQ_LOW_MIDI if driver == "irq" else X07_NOTE_MIN,
+    )
     return merge_identical(events)
 
 
@@ -532,10 +569,10 @@ def split_long_notes(
     return split
 
 
-def choose_pseudo_poly_support(note_value: int) -> int:
+def choose_pseudo_poly_support(note_value: int, min_note_value: int) -> int:
     for delta in (12, 7, 5, 4):
         support_note = note_value - delta
-        if support_note >= X07_NOTE_MIN:
+        if support_note >= min_note_value:
             return support_note
     return note_value
 
@@ -544,6 +581,7 @@ def apply_pseudo_polyphony(
     events: list[list[int]],
     pseudo_poly: int,
     pseudo_poly_step_units: int,
+    min_note_value: int,
 ) -> list[list[int]]:
     if pseudo_poly != 2 or pseudo_poly_step_units <= 0:
         return events
@@ -555,7 +593,7 @@ def apply_pseudo_polyphony(
             layered.append([note_value, duration_units])
             continue
 
-        support_note = choose_pseudo_poly_support(note_value)
+        support_note = choose_pseudo_poly_support(note_value, min_note_value)
         if support_note == note_value:
             layered.append([note_value, duration_units])
             continue
@@ -571,16 +609,44 @@ def apply_pseudo_polyphony(
     return layered
 
 
-def map_bass_note_to_x07(note: int, transpose: int, fold_octaves: bool) -> int | None:
+def map_bass_note(
+    note: int,
+    driver: str,
+    transpose: int,
+    fold_octaves: bool,
+    max_x07_note: int,
+    max_irq_midi: int,
+) -> int | None:
+    if driver == "irq":
+        mapped = midi_to_irq_note(note, transpose, fold_octaves)
+        if mapped is None:
+            return None
+        mapped = soften_high_irq_note(mapped, max_irq_midi)
+        while mapped - 12 >= IRQ_LOW_MIDI:
+            mapped -= 12
+        return mapped
+
     mapped = midi_to_x07(note, transpose, fold_octaves)
     if mapped is None:
         return None
+    mapped = soften_high_x07_note(mapped, max_x07_note)
     while mapped - 12 >= X07_NOTE_MIN:
         mapped -= 12
     return mapped
 
 
-def map_drum_note_to_x07(note: int) -> tuple[int, int] | None:
+def map_drum_note(note: int, driver: str) -> tuple[int, int] | None:
+    if driver == "irq":
+        if note in (35, 36):      # kick
+            return 31, 2
+        if note in (37, 38, 39, 40):  # snare / clap
+            return 38, 1
+        if note in (41, 43, 45, 47, 48, 50):  # toms
+            return 34, 1
+        if note in (42, 44, 46, 49, 51, 52, 53, 55, 57, 59):  # hats / cymbals / ride
+            return 46, 1
+        return None
+
     if note in (35, 36):      # kick
         return 1, 2
     if note in (37, 38, 39, 40):  # snare / clap
@@ -594,12 +660,15 @@ def map_drum_note_to_x07(note: int) -> tuple[int, int] | None:
 
 def build_bass_pulses(
     notes: list[MidiNote],
+    driver: str,
     ticks_per_beat: int,
     tempo_points: list[TempoPoint],
     tempo_ticks: list[int],
     unit_ms: int,
     transpose: int,
     fold_octaves: bool,
+    max_x07_note: int,
+    max_irq_midi: int,
     bass_pulse_units: int,
 ) -> list[tuple[int, int, int]]:
     if bass_pulse_units <= 0:
@@ -622,7 +691,14 @@ def build_bass_pulses(
     for start_unit in sorted(lowest_by_start):
         if start_unit - last_start < bass_pulse_units:
             continue
-        mapped = map_bass_note_to_x07(lowest_by_start[start_unit], transpose, fold_octaves)
+        mapped = map_bass_note(
+            lowest_by_start[start_unit],
+            driver,
+            transpose,
+            fold_octaves,
+            max_x07_note,
+            max_irq_midi,
+        )
         if mapped is None:
             continue
         pulses.append((start_unit, bass_pulse_units, mapped))
@@ -633,6 +709,7 @@ def build_bass_pulses(
 
 def build_drum_pulses(
     notes: list[MidiNote],
+    driver: str,
     ticks_per_beat: int,
     tempo_points: list[TempoPoint],
     tempo_ticks: list[int],
@@ -646,7 +723,7 @@ def build_drum_pulses(
     pulses_by_start: dict[int, tuple[int, int]] = {}
 
     for note in notes:
-        mapped = map_drum_note_to_x07(note.note)
+        mapped = map_drum_note(note.note, driver)
         if mapped is None:
             continue
         mapped_note, default_units = mapped
@@ -771,11 +848,70 @@ def encode_packed4(events: list[list[int]]) -> bytes:
     return bytes(out)
 
 
+def midi_note_to_divisor(midi_note: int) -> int:
+    frequency = 440.0 * (2.0 ** ((midi_note - 69) / 12.0))
+    if frequency <= 0:
+        return 4095
+    divisor = int(round(192000.0 / frequency))
+    return max(1, min(4095, divisor))
+
+
+def build_irq_pitch_table(events: list[list[int]]) -> tuple[list[list[int]], list[int]]:
+    ordered_pitches: list[int] = []
+    pitch_to_index: dict[int, int] = {}
+
+    for note_value, _ in events:
+        if note_value == 0 or note_value in pitch_to_index:
+            continue
+        pitch_to_index[note_value] = len(ordered_pitches) + 1
+        ordered_pitches.append(note_value)
+
+    indexed_events = [
+        [0 if note_value == 0 else pitch_to_index[note_value], duration_units]
+        for note_value, duration_units in events
+    ]
+    pitch_divisors = [midi_note_to_divisor(midi_note) for midi_note in ordered_pitches]
+    return indexed_events, pitch_divisors
+
+
+def convert_irq_events_to_ticks(
+    indexed_events: list[list[int]],
+    pitch_divisors: list[int],
+    unit_ms: int,
+) -> list[list[int]]:
+    converted: list[list[int]] = []
+    unit_factor = unit_ms * 192
+
+    for note_index, duration_units in indexed_events:
+        if note_index == 0:
+            divisor = IRQ_REST_DIVISOR
+        else:
+            divisor = pitch_divisors[note_index - 1]
+
+        tick_count = (duration_units * unit_factor + (divisor // 2)) // divisor
+        if tick_count <= 0:
+            tick_count = 1
+        converted.append([note_index, tick_count])
+
+    return converted
+
+
 def format_db_lines(payload: bytes) -> list[str]:
     lines = []
     for idx in range(0, len(payload), 12):
         chunk = payload[idx:idx + 12]
         lines.append("\t.db " + ",".join(f"${byte:02X}" for byte in chunk))
+    return lines
+
+
+def format_dw_lines(words: list[int]) -> list[str]:
+    if not words:
+        return []
+
+    lines = []
+    for idx in range(0, len(words), 8):
+        chunk = words[idx:idx + 8]
+        lines.append("\t.dw " + ",".join(f"${word:04X}" for word in chunk))
     return lines
 
 
@@ -803,24 +939,32 @@ def unit_ms_to_beep_ticks(unit_ms: int) -> int:
 
 
 def build_metadata_lines(
+    driver: str,
     selected_format: str,
     unit_ms: int,
     display_name: str,
     source_size: int,
     text_size: int,
     payload_size: int,
+    pitch_count: int,
     size_text: str,
 ) -> list[str]:
     format_symbol = "MUSIC_FORMAT_PACKED4" if selected_format == "packed4" else "MUSIC_FORMAT_PAIR8"
+    driver_symbol = "MUSIC_DRIVER_IRQ" if driver == "irq" else "MUSIC_DRIVER_BEEP"
     return [
+        "MUSIC_DRIVER_BEEP\tequ 0",
+        "MUSIC_DRIVER_IRQ\tequ 1",
         "MUSIC_FORMAT_PAIR8\tequ 0",
         "MUSIC_FORMAT_PACKED4\tequ 1",
+        f"MUSIC_DATA_DRIVER\tequ {driver_symbol}",
         f"MUSIC_DATA_FORMAT\tequ {format_symbol}",
         f"MUSIC_DATA_UNIT_MS\tequ {unit_ms}",
         f"MUSIC_DATA_BEEP_TICKS\tequ {unit_ms_to_beep_ticks(unit_ms)}",
+        f"MUSIC_DATA_IRQ_REST_DIVISOR\tequ {IRQ_REST_DIVISOR}",
         f"MUSIC_DATA_SOURCE_BYTES\tequ {source_size}",
         f"MUSIC_DATA_TEXT_BYTES\tequ {text_size}",
         f"MUSIC_DATA_PAYLOAD_BYTES\tequ {payload_size}",
+        f"MUSIC_DATA_PITCH_COUNT\tequ {pitch_count}",
         f"MUSIC_DATA_NAME_LEN\tequ {len(display_name)}",
         f'music_data_name:\t.db "{display_name}",0',
         f"MUSIC_DATA_SIZE_TEXT_LEN\tequ {len(size_text)}",
@@ -834,8 +978,10 @@ def build_report(
     track_names: list[str],
     kept_notes: int,
     events: list[list[int]],
+    driver: str,
     transpose: int,
     max_x07_note: int,
+    max_irq_midi: int,
     smooth_units: int,
     pseudo_poly: int,
     pseudo_poly_step_units: int,
@@ -845,18 +991,25 @@ def build_report(
     drum_pulse_units: int,
     selected_format: str,
     pair_bytes: bytes,
-    packed_bytes: bytes,
+    packed_bytes: bytes | None,
+    pitch_count: int,
     unit_ms: int,
 ) -> list[str]:
+    pitch_table_bytes = pitch_count * 2
+    pair_total_bytes = len(pair_bytes) + pitch_table_bytes
+    packed_size_text = f"{len(packed_bytes) + pitch_table_bytes} bytes" if packed_bytes is not None else "n/a"
     lines = [
         f"; generated from {source_name}",
         f"; source_bytes={source_size}",
         f"; tracks: {len(track_names)} | notes kept: {kept_notes} | events: {len(events)}",
-        f"; unit_ms={unit_ms} | beep_ticks={unit_ms_to_beep_ticks(unit_ms)} | transpose={transpose:+d} | max_x07_note={max_x07_note} | smooth_units={smooth_units} | pseudo_poly={pseudo_poly} | pseudo_poly_step_units={pseudo_poly_step_units} | x07_groove={int(x07_groove)} | bass_pulse_units={bass_pulse_units} | bass_gap_units={bass_gap_units} | drum_pulse_units={drum_pulse_units} | pair8={len(pair_bytes)} bytes | packed4={len(packed_bytes)} bytes",
+        f"; driver={driver} | unit_ms={unit_ms} | beep_ticks={unit_ms_to_beep_ticks(unit_ms)} | transpose={transpose:+d} | max_x07_note={max_x07_note} | max_irq_midi={max_irq_midi} | smooth_units={smooth_units} | pseudo_poly={pseudo_poly} | pseudo_poly_step_units={pseudo_poly_step_units} | x07_groove={int(x07_groove)} | bass_pulse_units={bass_pulse_units} | bass_gap_units={bass_gap_units} | drum_pulse_units={drum_pulse_units} | pitch_count={pitch_count} | pitch_table={pitch_table_bytes} bytes | pair8={pair_total_bytes} bytes | packed4={packed_size_text}",
         f"; selected format: {selected_format}",
         "; packed4: short=durations 1/2/4/8, $FC note dur8, $FD note dur16lo dur16hi, $FF end",
         "; pair8: note,duration pairs, $FF end",
-        "; sample player reads MUSIC_DATA_FORMAT and MUSIC_DATA_BEEP_TICKS from this file",
+        "; beep driver: note bytes are direct X-07 pitches (1..48)",
+        "; irq driver: note bytes are pitch-table indices, music_pitch_table stores 16-bit divisors",
+        "; irq driver: durations are already converted to baud-generator interrupt ticks",
+        "; sample player reads MUSIC_DATA_DRIVER, MUSIC_DATA_FORMAT and MUSIC_DATA_BEEP_TICKS from this file",
     ]
     return lines
 
@@ -889,10 +1042,12 @@ def main() -> int:
     parser.add_argument("--bin-output", help="Optional raw binary output file.")
     parser.add_argument("--list-tracks", action="store_true",
                         help="List MIDI tracks with note counts, channels and note ranges, then exit.")
+    parser.add_argument("--driver", choices=("beep", "irq"), default="beep",
+                        help="Target playback driver. beep matches ROM_BEEP. irq targets the fine custom IRQ driver.")
     parser.add_argument("--format", choices=("auto", "pair8", "packed4"), default="auto",
-                        help="Output format. auto selects the smallest one.")
+                        help="Event stream format. auto selects the smallest valid one for the chosen driver.")
     parser.add_argument("--unit-ms", type=int, default=100,
-                        help="Time quantization in milliseconds. Larger values produce simpler and smaller music.")
+                        help="Time quantization in milliseconds. For irq mode, smaller values like 5 or 10 are practical.")
     parser.add_argument("--min-note-units", type=int, default=1,
                         help="Drop notes shorter than this many time units.")
     parser.add_argument("--min-rest-units", type=int, default=1,
@@ -910,7 +1065,7 @@ def main() -> int:
     parser.add_argument("--pseudo-poly-step-units", type=int, default=2,
                         help="Duration of each alternation step in pseudo-poly mode.")
     parser.add_argument("--x07-groove", action="store_true",
-                        help="Add short low bass and drum pulses that usually sound better on the X-07 buzzer.")
+                        help="Add short low bass and drum pulses that usually sound better on the X-07 speaker.")
     parser.add_argument("--bass-pulse-units", type=int, default=2,
                         help="Duration of bass pulses added by --x07-groove.")
     parser.add_argument("--bass-gap-units", type=int, default=1,
@@ -936,7 +1091,9 @@ def main() -> int:
     parser.add_argument("--no-fold-octaves", action="store_true",
                         help="Do not fold out-of-range notes back by octaves.")
     parser.add_argument("--max-x07-note", type=int, default=X07_NOTE_MAX,
-                        help="Fold notes above this X-07 pitch down by one or more octaves (1..48).")
+                        help="Fold beep-driver notes above this X-07 pitch down by one or more octaves (1..48).")
+    parser.add_argument("--max-irq-midi", type=int, default=IRQ_HIGH_MIDI,
+                        help=f"Fold irq-driver notes above this MIDI pitch down by octaves ({IRQ_LOW_MIDI}..{IRQ_HIGH_MIDI}).")
     args = parser.parse_args()
 
     if args.unit_ms <= 0:
@@ -955,6 +1112,9 @@ def main() -> int:
         return 1
     if not X07_NOTE_MIN <= args.max_x07_note <= X07_NOTE_MAX:
         print(f"Error: --max-x07-note must be between {X07_NOTE_MIN} and {X07_NOTE_MAX}.", file=sys.stderr)
+        return 1
+    if not IRQ_LOW_MIDI <= args.max_irq_midi <= IRQ_HIGH_MIDI:
+        print(f"Error: --max-irq-midi must be between {IRQ_LOW_MIDI} and {IRQ_HIGH_MIDI}.", file=sys.stderr)
         return 1
 
     try:
@@ -1013,12 +1173,16 @@ def main() -> int:
     )
 
     if args.transpose is None:
-        transpose = choose_auto_transpose([note.note for note in notes_for_mono])
+        if args.driver == "irq":
+            transpose = choose_auto_transpose([note.note for note in notes_for_mono], IRQ_LOW_MIDI, IRQ_HIGH_MIDI)
+        else:
+            transpose = choose_auto_transpose([note.note for note in notes_for_mono], X07_LOW_MIDI, X07_HIGH_MIDI)
     else:
         transpose = args.transpose
 
     events = simplify_events(
         spans=spans,
+        driver=args.driver,
         unit_ms=args.unit_ms,
         min_note_units=args.min_note_units,
         min_rest_units=args.min_rest_units,
@@ -1027,6 +1191,7 @@ def main() -> int:
         transpose=transpose,
         fold_octaves=not args.no_fold_octaves,
         max_x07_note=args.max_x07_note,
+        max_irq_midi=args.max_irq_midi,
         max_note_units=args.max_note_units,
         retrigger_gap_units=args.retrigger_gap_units,
         pseudo_poly=args.pseudo_poly,
@@ -1040,12 +1205,15 @@ def main() -> int:
     if args.x07_groove:
         bass_pulses = build_bass_pulses(
             notes=music_notes,
+            driver=args.driver,
             ticks_per_beat=ticks_per_beat,
             tempo_points=tempo_points,
             tempo_ticks=tempo_ticks,
             unit_ms=args.unit_ms,
             transpose=transpose,
             fold_octaves=not args.no_fold_octaves,
+            max_x07_note=args.max_x07_note,
+            max_irq_midi=args.max_irq_midi,
             bass_pulse_units=args.bass_pulse_units,
         )
         if bass_pulses:
@@ -1054,6 +1222,7 @@ def main() -> int:
         if args.include_drums and drum_notes:
             drum_pulses = build_drum_pulses(
                 notes=drum_notes,
+                driver=args.driver,
                 ticks_per_beat=ticks_per_beat,
                 tempo_points=tempo_points,
                 tempo_ticks=tempo_ticks,
@@ -1065,11 +1234,22 @@ def main() -> int:
 
         events = merge_identical(events)
 
-    pair_bytes = encode_pair8(events)
-    packed_bytes = encode_packed4(events)
+    pitch_table: list[int] = []
+    encoded_events = events
+    if args.driver == "irq":
+        encoded_events, pitch_table = build_irq_pitch_table(events)
+        encoded_events = convert_irq_events_to_ticks(encoded_events, pitch_table, args.unit_ms)
+        if len(pitch_table) > 255:
+            print("Error: irq pitch table is too large for 8-bit indices.", file=sys.stderr)
+            return 1
+
+    pair_bytes = encode_pair8(encoded_events)
+    packed_bytes: bytes | None = None
+    if args.driver == "beep" or len(pitch_table) <= 48:
+        packed_bytes = encode_packed4(encoded_events)
 
     if args.format == "auto":
-        if len(packed_bytes) <= len(pair_bytes):
+        if packed_bytes is not None and len(packed_bytes) <= len(pair_bytes):
             selected_format = "packed4"
             payload = packed_bytes
         else:
@@ -1079,6 +1259,9 @@ def main() -> int:
         selected_format = "pair8"
         payload = pair_bytes
     else:
+        if packed_bytes is None:
+            print("Error: packed4 is unavailable for this irq conversion because it uses more than 48 distinct pitches.", file=sys.stderr)
+            return 1
         selected_format = "packed4"
         payload = packed_bytes
 
@@ -1091,8 +1274,10 @@ def main() -> int:
         track_names=track_names,
         kept_notes=len(notes_for_mono),
         events=events,
+        driver=args.driver,
         transpose=transpose,
         max_x07_note=args.max_x07_note,
+        max_irq_midi=args.max_irq_midi,
         smooth_units=args.smooth_units,
         pseudo_poly=args.pseudo_poly,
         pseudo_poly_step_units=args.pseudo_poly_step_units,
@@ -1103,10 +1288,14 @@ def main() -> int:
         selected_format=selected_format,
         pair_bytes=pair_bytes,
         packed_bytes=packed_bytes,
+        pitch_count=len(pitch_table),
         unit_ms=args.unit_ms,
     )
-    body_lines = [f"{label}:"] + format_db_lines(payload)
-    payload_size = len(payload)
+    body_lines = ["music_pitch_table:"]
+    if pitch_table:
+        body_lines += format_dw_lines(pitch_table)
+    body_lines += [f"{label}:"] + format_db_lines(payload)
+    payload_size = len(payload) + (len(pitch_table) * 2)
     text_size = 0
     size_text = f"{payload_size} bytes"
     asm_text = ""
@@ -1115,12 +1304,14 @@ def main() -> int:
         max_display_name_len = min(30, max(1, 40 - len(size_text)))
         display_name = sanitize_display_name(args.input_midi, max_display_name_len)
         metadata_lines = build_metadata_lines(
+            args.driver,
             selected_format,
             args.unit_ms,
             display_name,
             source_size,
             text_size,
             payload_size,
+            len(pitch_table),
             size_text,
         )
         asm_lines = header_lines + metadata_lines + body_lines
@@ -1134,12 +1325,14 @@ def main() -> int:
     max_display_name_len = min(30, max(1, 40 - len(size_text)))
     display_name = sanitize_display_name(args.input_midi, max_display_name_len)
     metadata_lines = build_metadata_lines(
+        args.driver,
         selected_format,
         args.unit_ms,
         display_name,
         source_size,
         text_size,
         payload_size,
+        len(pitch_table),
         size_text,
     )
     asm_lines = header_lines + metadata_lines + body_lines
@@ -1152,7 +1345,7 @@ def main() -> int:
         with open(args.bin_output, "wb") as handle:
             handle.write(payload)
 
-    print(f"OK: {len(events)} events, format {selected_format}, {len(payload)} bytes.")
+    print(f"OK: {len(events)} events, driver {args.driver}, format {selected_format}, {len(payload)} bytes.")
     print(f"ASM output: {output_path}")
     if args.bin_output:
         print(f"Binary output: {args.bin_output}")

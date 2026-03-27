@@ -1,3 +1,8 @@
+; ------------------------------------------------------------
+; midi2x07.z80
+; Demo player for MUSIC_DRIVER_BEEP data (ROM_BEEP based)
+; ------------------------------------------------------------
+
 	include "canon_x07.inc"
 
 	.org $2000
@@ -19,6 +24,10 @@ MUSIC_MAX_CHUNK_UNITS	equ 255 / MUSIC_DATA_BEEP_TICKS
 
 	IF MUSIC_MAX_CHUNK_UNITS <= 0
 		.error "MUSIC_MAX_CHUNK_UNITS must be > 0"
+	ENDIF
+
+	IF MUSIC_DATA_DRIVER != MUSIC_DRIVER_BEEP
+		.error "midi2x07.z80 demo player only supports MUSIC_DRIVER_BEEP data"
 	ENDIF
 
 	IF MUSIC_DATA_FORMAT != MUSIC_FORMAT_PAIR8
