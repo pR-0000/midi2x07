@@ -135,21 +135,32 @@ Commandes du lecteur :
 - `gauche` : redémarre la lecture depuis le début
 - `BREAK` : quitte le programme
 
-### Réglages utiles
+### Référence des options
 
-- `--format auto|pair8|packed4` : choix du format de sortie
-- `--unit-ms` : granularité temporelle
-- `--priority highest|newest|melody` : stratégie de réduction monophonique
-- `--merge-gap-units` : fusionne de très petits silences
-- `--smooth-units` : lisse micro-notes et micro-silences
-- `--max-x07-note` : rabat les notes trop aiguës d’une ou plusieurs octaves
-- `--x07-groove` : réinjecte des impulsions simplifiées de basse et de percussion, mieux adaptées au buzzer
-- `--bass-pulse-units` : durée des impulsions de basse ajoutées par `--x07-groove`
-- `--bass-gap-units` : petit silence ajouté après chaque impulsion de basse pour mieux marquer le tempo
-- `--drum-pulse-units` : durée des impulsions de percussion ajoutées par `--x07-groove`
-- `--max-note-units` : coupe les notes trop longues
-- `--retrigger-gap-units` : petit silence entre segments d’une note coupée
-- `--pseudo-poly 2` : illusion 2 voix par alternance rapide
+- `input_midi` : fichier MIDI source à convertir.
+- `-o`, `--output` : fichier ASM généré. Par défaut : `music_data.inc`.
+- `--bin-output` : export binaire brut optionnel du flux musical encodé.
+- `--format auto|pair8|packed4` : choisit le format de sortie. `auto` garde le plus compact.
+- `--unit-ms` : granularité temporelle. `50` est généralement le meilleur point de départ avec `ROM_BEEP`.
+- `--min-note-units` : supprime les notes trop courtes.
+- `--min-rest-units` : supprime les silences trop courts.
+- `--merge-gap-units` : fusionne `NOTE + petit silence + même NOTE`.
+- `--smooth-units` : lisse les micro-notes et micro-silences.
+- `--track` : conserve seulement certaines pistes MIDI. Option répétable.
+- `--channel` : conserve seulement certains canaux MIDI. Option répétable.
+- `--include-drums` : inclut le canal batterie.
+- `--priority highest|newest|melody` : stratégie de réduction monophonique.
+- `--transpose` : transposition manuelle en demi-tons. Très utile si l’auto-transpose rend la musique trop aiguë.
+- `--no-fold-octaves` : désactive le repli des notes hors plage par octaves.
+- `--max-x07-note` : rabat les notes trop aiguës vers une ou plusieurs octaves plus basses.
+- `--max-note-units` : coupe les notes trop longues en segments plus courts.
+- `--retrigger-gap-units` : insère un petit silence entre les segments d’une note coupée.
+- `--x07-groove` : réinjecte des impulsions simplifiées de basse et de percussion, mieux adaptées au buzzer.
+- `--bass-pulse-units` : durée des impulsions de basse ajoutées par `--x07-groove`.
+- `--bass-gap-units` : petit silence ajouté après chaque impulsion de basse pour mieux marquer le tempo.
+- `--drum-pulse-units` : durée des impulsions de percussion ajoutées par `--x07-groove`.
+- `--pseudo-poly 2` : illusion 2 voix par alternance rapide.
+- `--pseudo-poly-step-units` : durée de chaque alternance en mode pseudo-polyphonique.
 
 Pour la liste complète :
 
@@ -164,6 +175,7 @@ python midi2x07.py -h
 - `packed4` est souvent meilleur pour la taille
 - `pair8` est meilleur pour inspecter rapidement le résultat
 - pour une musique plus agréable sur buzzer, il vaut souvent mieux limiter les notes trop aiguës
+- si le MIDI source est déjà grave, essaye `--transpose 0` avant de laisser l’auto-transpose choisir une valeur trop haute
 - `--x07-groove` est utile quand un MIDI contient déjà une basse et une batterie, mais que la réduction monophonique pure donne un rendu trop aigu ou trop pauvre
 - avec `--x07-groove`, la ligne principale reste monophonique et le script réécrit seulement de très courtes impulsions graves de basse et de percussion
 - `--bass-gap-units 1` est un bon point de départ pour éviter que la basse ne se transforme en note continue
@@ -171,8 +183,24 @@ python midi2x07.py -h
 Exemple de commande orientée “buzzer agréable” :
 
 ```powershell
-python midi2x07.py music.mid --format auto --unit-ms 50 --priority melody --merge-gap-units 1 --smooth-units 1 --max-x07-note 32 --x07-groove --include-drums
+python midi2x07.py music.mid --format auto --unit-ms 50 --priority melody --merge-gap-units 1 --smooth-units 1 --transpose 0 --max-x07-note 32 --x07-groove --include-drums
 ```
+
+### Presets rapides
+
+| Preset | Usage recommandé | Commande type |
+| --- | --- | --- |
+| `balanced` | Bon point de départ général | `python midi2x07.py music.mid --format auto --unit-ms 50 --priority melody --merge-gap-units 1 --smooth-units 1` |
+| `low` | MIDI déjà grave ou rendu trop aigu | `python midi2x07.py music.mid --format auto --unit-ms 50 --priority melody --merge-gap-units 1 --smooth-units 1 --transpose 0 --max-x07-note 24` |
+| `buzzer-friendly` | MIDI polyphonique avec basse/batterie à simplifier | `python midi2x07.py music.mid --format auto --unit-ms 50 --priority melody --merge-gap-units 1 --smooth-units 1 --transpose 0 --max-x07-note 32 --x07-groove --include-drums --bass-gap-units 1` |
+| `compact` | Réduire au maximum la taille | `python midi2x07.py music.mid --format auto --unit-ms 100 --priority highest --merge-gap-units 2 --smooth-units 2 --max-x07-note 28` |
+
+Repères rapides :
+
+- `balanced` : à essayer en premier.
+- `low` : utile si le résultat est trop strident.
+- `buzzer-friendly` : utile si la version monophonique pure perd trop le rythme.
+- `compact` : pratique pour des thèmes secondaires ou des jingles.
 
 ### Limites
 
@@ -315,21 +343,32 @@ Player controls:
 - `left`: restart playback from the beginning
 - `BREAK`: quit the program
 
-### Useful options
+### Option reference
 
-- `--format auto|pair8|packed4`: output format
-- `--unit-ms`: time quantization
-- `--priority highest|newest|melody`: monophonic reduction strategy
-- `--merge-gap-units`: merges very short rests
-- `--smooth-units`: smooths very short notes and rests
-- `--max-x07-note`: folds overly high notes down by one or more octaves
-- `--x07-groove`: reinjects simplified bass and drum pulses that fit the buzzer better
-- `--bass-pulse-units`: duration of bass pulses added by `--x07-groove`
-- `--bass-gap-units`: small rest inserted after each bass pulse to keep the rhythm audible
-- `--drum-pulse-units`: duration of drum pulses added by `--x07-groove`
-- `--max-note-units`: splits notes that are too long
-- `--retrigger-gap-units`: inserts a small gap between split note segments
-- `--pseudo-poly 2`: fake 2-voice effect by fast alternation
+- `input_midi`: source MIDI file to convert.
+- `-o`, `--output`: generated ASM file. Default: `music_data.inc`.
+- `--bin-output`: optional raw binary export of the encoded music stream.
+- `--format auto|pair8|packed4`: output format. `auto` keeps the smallest one.
+- `--unit-ms`: time quantization. `50` is usually the best starting point with `ROM_BEEP`.
+- `--min-note-units`: drop notes that are too short.
+- `--min-rest-units`: drop rests that are too short.
+- `--merge-gap-units`: merge `NOTE + short rest + same NOTE`.
+- `--smooth-units`: smooth very short notes and rests.
+- `--track`: keep only selected MIDI tracks. Repeatable.
+- `--channel`: keep only selected MIDI channels. Repeatable.
+- `--include-drums`: include the drum channel.
+- `--priority highest|newest|melody`: monophonic reduction strategy.
+- `--transpose`: manual transposition in semitones. Very useful when auto-transpose makes the result too bright.
+- `--no-fold-octaves`: disable octave folding for out-of-range notes.
+- `--max-x07-note`: fold overly bright notes down by one or more octaves.
+- `--max-note-units`: split very long notes into shorter segments.
+- `--retrigger-gap-units`: insert a small gap between split note segments.
+- `--x07-groove`: reinject simplified bass and drum pulses that fit the buzzer better.
+- `--bass-pulse-units`: duration of bass pulses added by `--x07-groove`.
+- `--bass-gap-units`: small rest inserted after each bass pulse to keep the rhythm audible.
+- `--drum-pulse-units`: duration of drum pulses added by `--x07-groove`.
+- `--pseudo-poly 2`: fake 2 voices by fast alternation.
+- `--pseudo-poly-step-units`: duration of each pseudo-poly alternation step.
 
 For the full list:
 
@@ -344,6 +383,7 @@ python midi2x07.py -h
 - `packed4` is often better for size
 - `pair8` is better for quickly inspecting the result
 - to make buzzer playback more pleasant, it often helps to limit very high notes
+- if the source MIDI already sits in a low register, try `--transpose 0` before relying on auto-transpose
 - `--x07-groove` is useful when a MIDI already contains bass and drums, but pure monophonic reduction sounds too thin or too shrill
 - with `--x07-groove`, the main line stays monophonic and the script only rewrites very short low bass and drum pulses
 - `--bass-gap-units 1` is a good starting point if the bass starts to feel too continuous
@@ -351,8 +391,24 @@ python midi2x07.py -h
 Example of a more buzzer-friendly conversion:
 
 ```powershell
-python midi2x07.py music.mid --format auto --unit-ms 50 --priority melody --merge-gap-units 1 --smooth-units 1 --max-x07-note 32 --x07-groove --include-drums
+python midi2x07.py music.mid --format auto --unit-ms 50 --priority melody --merge-gap-units 1 --smooth-units 1 --transpose 0 --max-x07-note 32 --x07-groove --include-drums
 ```
+
+### Quick presets
+
+| Preset | Recommended use | Typical command |
+| --- | --- | --- |
+| `balanced` | Good general starting point | `python midi2x07.py music.mid --format auto --unit-ms 50 --priority melody --merge-gap-units 1 --smooth-units 1` |
+| `low` | Source MIDI already sits low, or output sounds too bright | `python midi2x07.py music.mid --format auto --unit-ms 50 --priority melody --merge-gap-units 1 --smooth-units 1 --transpose 0 --max-x07-note 24` |
+| `buzzer-friendly` | Polyphonic MIDI with bass/drums that needs buzzer-oriented simplification | `python midi2x07.py music.mid --format auto --unit-ms 50 --priority melody --merge-gap-units 1 --smooth-units 1 --transpose 0 --max-x07-note 32 --x07-groove --include-drums --bass-gap-units 1` |
+| `compact` | Minimize data size as much as possible | `python midi2x07.py music.mid --format auto --unit-ms 100 --priority highest --merge-gap-units 2 --smooth-units 2 --max-x07-note 28` |
+
+Quick hints:
+
+- `balanced`: try this first.
+- `low`: use this when the result sounds too shrill.
+- `buzzer-friendly`: use this when pure monophonic reduction loses too much rhythm.
+- `compact`: handy for secondary themes or short jingles.
 
 ### Limits
 

@@ -857,57 +857,57 @@ def build_report(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Convertit un fichier MIDI en flux monophonique compact pour le Canon X-07."
+        description="Convert a MIDI file into compact monophonic music data for the Canon X-07."
     )
-    parser.add_argument("input_midi", help="Chemin du fichier MIDI source.")
-    parser.add_argument("-o", "--output", help="Fichier de sortie .inc/.asm (defaut: music_data.inc).")
-    parser.add_argument("--bin-output", help="Fichier binaire brut optionnel.")
+    parser.add_argument("input_midi", help="Path to the source MIDI file.")
+    parser.add_argument("-o", "--output", help="Output .inc/.asm file (default: music_data.inc).")
+    parser.add_argument("--bin-output", help="Optional raw binary output file.")
     parser.add_argument("--format", choices=("auto", "pair8", "packed4"), default="auto",
-                        help="Format de sortie. auto choisit le plus compact.")
+                        help="Output format. auto selects the smallest one.")
     parser.add_argument("--unit-ms", type=int, default=100,
-                        help="Granularite temporelle en ms. Plus grand = musique plus simple et plus compacte.")
+                        help="Time quantization in milliseconds. Larger values produce simpler and smaller music.")
     parser.add_argument("--min-note-units", type=int, default=1,
-                        help="Supprime les notes plus courtes que ce nombre d'unites.")
+                        help="Drop notes shorter than this many time units.")
     parser.add_argument("--min-rest-units", type=int, default=1,
-                        help="Supprime les silences plus courts que ce nombre d'unites.")
+                        help="Drop rests shorter than this many time units.")
     parser.add_argument("--merge-gap-units", type=int, default=1,
-                        help="Fusionne NOTE + petit silence + meme NOTE si le silence ne depasse pas cette valeur.")
+                        help="Merge NOTE + short rest + same NOTE when the rest is no longer than this value.")
     parser.add_argument("--smooth-units", type=int, default=0,
-                        help="Lisse les micro-silences et micro-notes jusqu'a cette duree.")
+                        help="Smooth very short rests and notes up to this duration.")
     parser.add_argument("--max-note-units", type=int, default=0,
-                        help="Coupe les notes longues en segments plus courts. 0 = desactive.")
+                        help="Split long notes into shorter segments. 0 disables the feature.")
     parser.add_argument("--retrigger-gap-units", type=int, default=0,
-                        help="Petit silence insere entre segments d'une note coupee.")
+                        help="Insert a small rest between split note segments.")
     parser.add_argument("--pseudo-poly", type=int, choices=(0, 2), default=0,
-                        help="Simule 2 voix en alternant rapidement la melodie et une voix grave.")
+                        help="Fake 2 voices by rapidly alternating the melody and a lower support note.")
     parser.add_argument("--pseudo-poly-step-units", type=int, default=2,
-                        help="Duree de chaque alternance du mode pseudo-polyphonique.")
+                        help="Duration of each alternation step in pseudo-poly mode.")
     parser.add_argument("--x07-groove", action="store_true",
-                        help="Ajoute de courtes impulsions graves de basse et de percussions pour mieux passer sur le buzzer.")
+                        help="Add short low bass and drum pulses that usually sound better on the X-07 buzzer.")
     parser.add_argument("--bass-pulse-units", type=int, default=2,
-                        help="Duree des impulsions de basse ajoutees en mode --x07-groove.")
+                        help="Duration of bass pulses added by --x07-groove.")
     parser.add_argument("--bass-gap-units", type=int, default=1,
-                        help="Petit silence insere apres chaque impulsion de basse pour mieux marquer le tempo.")
+                        help="Small rest inserted after each bass pulse to keep the rhythm audible.")
     parser.add_argument("--drum-pulse-units", type=int, default=1,
-                        help="Duree des impulsions de percussion ajoutees en mode --x07-groove.")
+                        help="Duration of drum pulses added by --x07-groove.")
     parser.add_argument("--track", type=int, action="append",
-                        help="Ne garder que cette piste MIDI (index 0-based). Option repetable.")
+                        help="Keep only this MIDI track (0-based index). Repeatable.")
     parser.add_argument("--channel", type=int, action="append",
-                        help="Ne garder que ce canal MIDI (1..16). Option repetable.")
+                        help="Keep only this MIDI channel (1..16). Repeatable.")
     parser.add_argument("--include-drums", action="store_true",
-                        help="Inclut le canal 10. Avec --x07-groove, le canal batterie est converti en impulsions simplifiees.")
+                        help="Include channel 10 drums. With --x07-groove, drum events are converted to simplified pulses.")
     parser.add_argument("--priority", choices=("highest", "newest", "melody"), default="highest",
-                        help="Strategie de reduction en monophonie.")
+                        help="Monophonic reduction strategy.")
     parser.add_argument("--transpose", type=int,
-                        help="Transpose en demi-tons. Par defaut, le script choisit automatiquement un decalage d'octave.")
+                        help="Transpose in semitones. By default the script chooses an automatic octave offset.")
     parser.add_argument("--no-fold-octaves", action="store_true",
-                        help="N'enroule pas les notes hors plage par octaves.")
+                        help="Do not fold out-of-range notes back by octaves.")
     parser.add_argument("--max-x07-note", type=int, default=X07_NOTE_MAX,
-                        help="Rabaisse d'une ou plusieurs octaves les notes au-dessus de cette hauteur X-07 (1..48).")
+                        help="Fold notes above this X-07 pitch down by one or more octaves (1..48).")
     args = parser.parse_args()
 
     if args.unit_ms <= 0:
-        print("Erreur: --unit-ms doit etre > 0.", file=sys.stderr)
+        print("Error: --unit-ms must be > 0.", file=sys.stderr)
         return 1
     if (
         args.smooth_units < 0
@@ -918,16 +918,16 @@ def main() -> int:
         or args.drum_pulse_units < 0
         or args.pseudo_poly_step_units <= 0
     ):
-        print("Erreur: --smooth-units, --max-note-units, --retrigger-gap-units, --bass-pulse-units, --bass-gap-units et --drum-pulse-units doivent etre >= 0, et --pseudo-poly-step-units > 0.", file=sys.stderr)
+        print("Error: --smooth-units, --max-note-units, --retrigger-gap-units, --bass-pulse-units, --bass-gap-units and --drum-pulse-units must be >= 0, and --pseudo-poly-step-units must be > 0.", file=sys.stderr)
         return 1
     if not X07_NOTE_MIN <= args.max_x07_note <= X07_NOTE_MAX:
-        print(f"Erreur: --max-x07-note doit etre entre {X07_NOTE_MIN} et {X07_NOTE_MAX}.", file=sys.stderr)
+        print(f"Error: --max-x07-note must be between {X07_NOTE_MIN} and {X07_NOTE_MAX}.", file=sys.stderr)
         return 1
 
     try:
         ticks_per_beat, notes, tempo_events, track_names = parse_midi(args.input_midi)
     except ValueError as exc:
-        print(f"Erreur MIDI: {exc}", file=sys.stderr)
+        print(f"MIDI error: {exc}", file=sys.stderr)
         return 1
 
     if args.track:
@@ -949,13 +949,13 @@ def main() -> int:
         notes_for_mono = music_notes
 
     if not notes_for_mono:
-        print("Aucune note exploitable apres filtrage.", file=sys.stderr)
+        print("No usable notes left after filtering.", file=sys.stderr)
         return 1
 
     try:
         source_size = os.path.getsize(args.input_midi)
     except OSError as exc:
-        print(f"Erreur taille fichier: {exc}", file=sys.stderr)
+        print(f"File size error: {exc}", file=sys.stderr)
         return 1
 
     tempo_points, tempo_ticks = build_tempo_map(ticks_per_beat, tempo_events)
@@ -983,7 +983,7 @@ def main() -> int:
     )
 
     if not events:
-        print("La simplification a supprime tous les evenements musicaux.", file=sys.stderr)
+        print("Simplification removed all musical events.", file=sys.stderr)
         return 1
 
     if args.x07_groove:
@@ -1101,10 +1101,10 @@ def main() -> int:
         with open(args.bin_output, "wb") as handle:
             handle.write(payload)
 
-    print(f"OK: {len(events)} evenements, format {selected_format}, {len(payload)} octets.")
-    print(f"Sortie ASM: {output_path}")
+    print(f"OK: {len(events)} events, format {selected_format}, {len(payload)} bytes.")
+    print(f"ASM output: {output_path}")
     if args.bin_output:
-        print(f"Sortie binaire: {args.bin_output}")
+        print(f"Binary output: {args.bin_output}")
     return 0
 
 
