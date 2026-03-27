@@ -27,6 +27,8 @@ Le fichier généré contient toujours :
 - `MUSIC_DATA_UNIT_MS`
 - `MUSIC_DATA_BEEP_TICKS`
 - `MUSIC_DATA_SOURCE_BYTES`
+- `MUSIC_DATA_TEXT_BYTES`
+- `MUSIC_DATA_PAYLOAD_BYTES`
 - `MUSIC_DATA_NAME_LEN`
 - `music_data_name`
 - `MUSIC_DATA_SIZE_TEXT_LEN`
@@ -99,15 +101,17 @@ MUSIC_DATA_FORMAT       equ MUSIC_FORMAT_PAIR8
 MUSIC_DATA_UNIT_MS      equ 50
 MUSIC_DATA_BEEP_TICKS   equ 1
 MUSIC_DATA_SOURCE_BYTES equ 26436
+MUSIC_DATA_TEXT_BYTES   equ 2166
+MUSIC_DATA_PAYLOAD_BYTES equ 843
 MUSIC_DATA_NAME_LEN     equ 9
 music_data_name:        .db "music.mid",0
-MUSIC_DATA_SIZE_TEXT_LEN equ 11
-music_data_size_text:   .db "26436 bytes",0
+MUSIC_DATA_SIZE_TEXT_LEN equ 9
+music_data_size_text:   .db "843 bytes",0
 music_data:
     .db ...
 ```
 
-Le nom du fichier MIDI source est tronqué de manière à conserver le suffixe `.mid` et à pouvoir s’afficher sur les lignes 2 et 3, jusqu’à environ 30 caractères selon la place laissée à l’indication de taille.
+Le nom du fichier MIDI source est tronqué de manière à conserver le suffixe `.mid` et à pouvoir s’afficher sur les lignes 2 et 3, jusqu’à environ 30 caractères selon la place laissée à l’indication de taille. La taille affichée dans le lecteur correspond à la taille réelle des données musicales encodées dans le programme, pas au MIDI d’origine ni à la taille texte du fichier `music_data.inc`.
 
 ### Lecteur ASM
 
@@ -139,6 +143,10 @@ Commandes du lecteur :
 - `--merge-gap-units` : fusionne de très petits silences
 - `--smooth-units` : lisse micro-notes et micro-silences
 - `--max-x07-note` : rabat les notes trop aiguës d’une ou plusieurs octaves
+- `--x07-groove` : réinjecte des impulsions simplifiées de basse et de percussion, mieux adaptées au buzzer
+- `--bass-pulse-units` : durée des impulsions de basse ajoutées par `--x07-groove`
+- `--bass-gap-units` : petit silence ajouté après chaque impulsion de basse pour mieux marquer le tempo
+- `--drum-pulse-units` : durée des impulsions de percussion ajoutées par `--x07-groove`
 - `--max-note-units` : coupe les notes trop longues
 - `--retrigger-gap-units` : petit silence entre segments d’une note coupée
 - `--pseudo-poly 2` : illusion 2 voix par alternance rapide
@@ -156,6 +164,15 @@ python midi2x07.py -h
 - `packed4` est souvent meilleur pour la taille
 - `pair8` est meilleur pour inspecter rapidement le résultat
 - pour une musique plus agréable sur buzzer, il vaut souvent mieux limiter les notes trop aiguës
+- `--x07-groove` est utile quand un MIDI contient déjà une basse et une batterie, mais que la réduction monophonique pure donne un rendu trop aigu ou trop pauvre
+- avec `--x07-groove`, la ligne principale reste monophonique et le script réécrit seulement de très courtes impulsions graves de basse et de percussion
+- `--bass-gap-units 1` est un bon point de départ pour éviter que la basse ne se transforme en note continue
+
+Exemple de commande orientée “buzzer agréable” :
+
+```powershell
+python midi2x07.py music.mid --format auto --unit-ms 50 --priority melody --merge-gap-units 1 --smooth-units 1 --max-x07-note 32 --x07-groove --include-drums
+```
 
 ### Limites
 
@@ -190,6 +207,8 @@ The generated file always contains:
 - `MUSIC_DATA_UNIT_MS`
 - `MUSIC_DATA_BEEP_TICKS`
 - `MUSIC_DATA_SOURCE_BYTES`
+- `MUSIC_DATA_TEXT_BYTES`
+- `MUSIC_DATA_PAYLOAD_BYTES`
 - `MUSIC_DATA_NAME_LEN`
 - `music_data_name`
 - `MUSIC_DATA_SIZE_TEXT_LEN`
@@ -262,15 +281,17 @@ MUSIC_DATA_FORMAT       equ MUSIC_FORMAT_PAIR8
 MUSIC_DATA_UNIT_MS      equ 50
 MUSIC_DATA_BEEP_TICKS   equ 1
 MUSIC_DATA_SOURCE_BYTES equ 26436
+MUSIC_DATA_TEXT_BYTES   equ 2166
+MUSIC_DATA_PAYLOAD_BYTES equ 843
 MUSIC_DATA_NAME_LEN     equ 9
 music_data_name:        .db "music.mid",0
-MUSIC_DATA_SIZE_TEXT_LEN equ 11
-music_data_size_text:   .db "26436 bytes",0
+MUSIC_DATA_SIZE_TEXT_LEN equ 9
+music_data_size_text:   .db "843 bytes",0
 music_data:
     .db ...
 ```
 
-The source MIDI filename is truncated so that the `.mid` suffix stays visible and the text can still fit across lines 2 and 3, up to about 30 characters depending on the byte-count text.
+The source MIDI filename is truncated so that the `.mid` suffix stays visible and the text can still fit across lines 2 and 3, up to about 30 characters depending on the byte-count text. The displayed size matches the actual encoded music payload stored in the program, not the original MIDI and not the text size of `music_data.inc`.
 
 ### ASM player
 
@@ -302,6 +323,10 @@ Player controls:
 - `--merge-gap-units`: merges very short rests
 - `--smooth-units`: smooths very short notes and rests
 - `--max-x07-note`: folds overly high notes down by one or more octaves
+- `--x07-groove`: reinjects simplified bass and drum pulses that fit the buzzer better
+- `--bass-pulse-units`: duration of bass pulses added by `--x07-groove`
+- `--bass-gap-units`: small rest inserted after each bass pulse to keep the rhythm audible
+- `--drum-pulse-units`: duration of drum pulses added by `--x07-groove`
 - `--max-note-units`: splits notes that are too long
 - `--retrigger-gap-units`: inserts a small gap between split note segments
 - `--pseudo-poly 2`: fake 2-voice effect by fast alternation
@@ -319,6 +344,15 @@ python midi2x07.py -h
 - `packed4` is often better for size
 - `pair8` is better for quickly inspecting the result
 - to make buzzer playback more pleasant, it often helps to limit very high notes
+- `--x07-groove` is useful when a MIDI already contains bass and drums, but pure monophonic reduction sounds too thin or too shrill
+- with `--x07-groove`, the main line stays monophonic and the script only rewrites very short low bass and drum pulses
+- `--bass-gap-units 1` is a good starting point if the bass starts to feel too continuous
+
+Example of a more buzzer-friendly conversion:
+
+```powershell
+python midi2x07.py music.mid --format auto --unit-ms 50 --priority melody --merge-gap-units 1 --smooth-units 1 --max-x07-note 32 --x07-groove --include-drums
+```
 
 ### Limits
 

@@ -1,7 +1,7 @@
 ; generated from Mozart - Turkish March.mid
 ; source_bytes=26436
 ; tracks: 10 | notes kept: 2819 | events: 1453
-; unit_ms=50 | beep_ticks=1 | transpose=+24 | max_x07_note=48 | smooth_units=1 | pseudo_poly=0 | pseudo_poly_step_units=2 | pair8=2907 bytes | packed4=1754 bytes
+; unit_ms=50 | beep_ticks=1 | transpose=+24 | max_x07_note=48 | smooth_units=1 | pseudo_poly=0 | pseudo_poly_step_units=2 | x07_groove=0 | bass_pulse_units=2 | bass_gap_units=1 | drum_pulse_units=1 | pair8=2907 bytes | packed4=1754 bytes
 ; selected format: packed4
 ; packed4: short=durations 1/2/4/8, $FC note dur8, $FD note dur16lo dur16hi, $FF end
 ; pair8: note,duration pairs, $FF end
@@ -12,10 +12,12 @@ MUSIC_DATA_FORMAT	equ MUSIC_FORMAT_PACKED4
 MUSIC_DATA_UNIT_MS	equ 50
 MUSIC_DATA_BEEP_TICKS	equ 1
 MUSIC_DATA_SOURCE_BYTES	equ 26436
+MUSIC_DATA_TEXT_BYTES	equ 8744
+MUSIC_DATA_PAYLOAD_BYTES	equ 1754
 MUSIC_DATA_NAME_LEN	equ 26
 music_data_name:	.db "Mozart - Turkish March.mid",0
-MUSIC_DATA_SIZE_TEXT_LEN	equ 11
-music_data_size_text:	.db "26436 bytes",0
+MUSIC_DATA_SIZE_TEXT_LEN	equ 10
+music_data_size_text:	.db "1754 bytes",0
 music_data:
 	.db $4F,$4D,$4C,$4D,$50,$31,$48,$31,$52,$50,$4F,$50
 	.db $54,$31,$48,$31,$55,$54,$53,$54,$5B,$59,$58,$59

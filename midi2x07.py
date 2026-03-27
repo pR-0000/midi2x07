@@ -565,6 +565,170 @@ def apply_pseudo_polyphony(
     return layered
 
 
+def map_bass_note_to_x07(note: int, transpose: int, fold_octaves: bool) -> int | None:
+    mapped = midi_to_x07(note, transpose, fold_octaves)
+    if mapped is None:
+        return None
+    while mapped - 12 >= X07_NOTE_MIN:
+        mapped -= 12
+    return mapped
+
+
+def map_drum_note_to_x07(note: int) -> tuple[int, int] | None:
+    if note in (35, 36):      # kick
+        return 1, 2
+    if note in (37, 38, 39, 40):  # snare / clap
+        return 4, 1
+    if note in (41, 43, 45, 47, 48, 50):  # toms
+        return 3, 1
+    if note in (42, 44, 46, 49, 51, 52, 53, 55, 57, 59):  # hats / cymbals / ride
+        return 6, 1
+    return None
+
+
+def build_bass_pulses(
+    notes: list[MidiNote],
+    ticks_per_beat: int,
+    tempo_points: list[TempoPoint],
+    tempo_ticks: list[int],
+    unit_ms: int,
+    transpose: int,
+    fold_octaves: bool,
+    bass_pulse_units: int,
+) -> list[tuple[int, int, int]]:
+    if bass_pulse_units <= 0:
+        return []
+
+    unit_us = unit_ms * 1000
+    lowest_by_start: dict[int, int] = {}
+
+    for note in notes:
+        if note.note > 60:
+            continue
+        start_us = tick_to_us(note.start_tick, tempo_points, tempo_ticks, ticks_per_beat)
+        start_unit = max(0, int(round(start_us / unit_us)))
+        current = lowest_by_start.get(start_unit)
+        if current is None or note.note < current:
+            lowest_by_start[start_unit] = note.note
+
+    pulses: list[tuple[int, int, int]] = []
+    last_start = -9999
+    for start_unit in sorted(lowest_by_start):
+        if start_unit - last_start < bass_pulse_units:
+            continue
+        mapped = map_bass_note_to_x07(lowest_by_start[start_unit], transpose, fold_octaves)
+        if mapped is None:
+            continue
+        pulses.append((start_unit, bass_pulse_units, mapped))
+        last_start = start_unit
+
+    return pulses
+
+
+def build_drum_pulses(
+    notes: list[MidiNote],
+    ticks_per_beat: int,
+    tempo_points: list[TempoPoint],
+    tempo_ticks: list[int],
+    unit_ms: int,
+    drum_pulse_units: int,
+) -> list[tuple[int, int, int]]:
+    if drum_pulse_units <= 0:
+        return []
+
+    unit_us = unit_ms * 1000
+    pulses_by_start: dict[int, tuple[int, int]] = {}
+
+    for note in notes:
+        mapped = map_drum_note_to_x07(note.note)
+        if mapped is None:
+            continue
+        mapped_note, default_units = mapped
+        start_us = tick_to_us(note.start_tick, tempo_points, tempo_ticks, ticks_per_beat)
+        start_unit = max(0, int(round(start_us / unit_us)))
+        pulses_by_start[start_unit] = (mapped_note, max(drum_pulse_units, default_units))
+
+    return [
+        (start_unit, duration_units, mapped_note)
+        for start_unit, (mapped_note, duration_units) in sorted(pulses_by_start.items())
+    ]
+
+
+def events_to_unit_array(events: list[list[int]]) -> list[int]:
+    units: list[int] = []
+    for note_value, duration_units in events:
+        units.extend([note_value] * duration_units)
+    return units
+
+
+def unit_array_to_events(units: list[int]) -> list[list[int]]:
+    if not units:
+        return []
+
+    events: list[list[int]] = []
+    current_note = units[0]
+    current_duration = 1
+
+    for note_value in units[1:]:
+        if note_value == current_note:
+            current_duration += 1
+        else:
+            events.append([current_note, current_duration])
+            current_note = note_value
+            current_duration = 1
+
+    events.append([current_note, current_duration])
+    return events
+
+
+def overlay_pulses(events: list[list[int]], pulses: list[tuple[int, int, int]]) -> list[list[int]]:
+    if not events or not pulses:
+        return events
+
+    units = events_to_unit_array(events)
+    total_units = len(units)
+
+    for start_unit, duration_units, note_value in pulses:
+        if start_unit >= total_units or duration_units <= 0:
+            continue
+        end_unit = min(total_units, start_unit + duration_units)
+        for idx in range(start_unit, end_unit):
+            units[idx] = note_value
+
+    return unit_array_to_events(units)
+
+
+def overlay_pulses_staccato(
+    events: list[list[int]],
+    pulses: list[tuple[int, int, int]],
+    gap_units: int,
+) -> list[list[int]]:
+    if gap_units <= 0:
+        return overlay_pulses(events, pulses)
+    if not events or not pulses:
+        return events
+
+    units = events_to_unit_array(events)
+    total_units = len(units)
+    pulse_starts = {start_unit for start_unit, _, _ in pulses if 0 <= start_unit < total_units}
+
+    for start_unit, duration_units, note_value in pulses:
+        if start_unit >= total_units or duration_units <= 0:
+            continue
+
+        end_unit = min(total_units, start_unit + duration_units)
+        for idx in range(start_unit, end_unit):
+            units[idx] = note_value
+
+        gap_end = min(total_units, end_unit + gap_units)
+        for idx in range(end_unit, gap_end):
+            if idx in pulse_starts:
+                break
+            units[idx] = 0
+
+    return unit_array_to_events(units)
+
+
 def encode_pair8(events: list[list[int]]) -> bytes:
     out = bytearray()
     for note_value, duration_units in events:
@@ -637,6 +801,8 @@ def build_metadata_lines(
     unit_ms: int,
     display_name: str,
     source_size: int,
+    text_size: int,
+    payload_size: int,
     size_text: str,
 ) -> list[str]:
     format_symbol = "MUSIC_FORMAT_PACKED4" if selected_format == "packed4" else "MUSIC_FORMAT_PAIR8"
@@ -647,6 +813,8 @@ def build_metadata_lines(
         f"MUSIC_DATA_UNIT_MS\tequ {unit_ms}",
         f"MUSIC_DATA_BEEP_TICKS\tequ {unit_ms_to_beep_ticks(unit_ms)}",
         f"MUSIC_DATA_SOURCE_BYTES\tequ {source_size}",
+        f"MUSIC_DATA_TEXT_BYTES\tequ {text_size}",
+        f"MUSIC_DATA_PAYLOAD_BYTES\tequ {payload_size}",
         f"MUSIC_DATA_NAME_LEN\tequ {len(display_name)}",
         f'music_data_name:\t.db "{display_name}",0',
         f"MUSIC_DATA_SIZE_TEXT_LEN\tequ {len(size_text)}",
@@ -665,6 +833,10 @@ def build_report(
     smooth_units: int,
     pseudo_poly: int,
     pseudo_poly_step_units: int,
+    x07_groove: bool,
+    bass_pulse_units: int,
+    bass_gap_units: int,
+    drum_pulse_units: int,
     selected_format: str,
     pair_bytes: bytes,
     packed_bytes: bytes,
@@ -674,7 +846,7 @@ def build_report(
         f"; generated from {source_name}",
         f"; source_bytes={source_size}",
         f"; tracks: {len(track_names)} | notes kept: {kept_notes} | events: {len(events)}",
-        f"; unit_ms={unit_ms} | beep_ticks={unit_ms_to_beep_ticks(unit_ms)} | transpose={transpose:+d} | max_x07_note={max_x07_note} | smooth_units={smooth_units} | pseudo_poly={pseudo_poly} | pseudo_poly_step_units={pseudo_poly_step_units} | pair8={len(pair_bytes)} bytes | packed4={len(packed_bytes)} bytes",
+        f"; unit_ms={unit_ms} | beep_ticks={unit_ms_to_beep_ticks(unit_ms)} | transpose={transpose:+d} | max_x07_note={max_x07_note} | smooth_units={smooth_units} | pseudo_poly={pseudo_poly} | pseudo_poly_step_units={pseudo_poly_step_units} | x07_groove={int(x07_groove)} | bass_pulse_units={bass_pulse_units} | bass_gap_units={bass_gap_units} | drum_pulse_units={drum_pulse_units} | pair8={len(pair_bytes)} bytes | packed4={len(packed_bytes)} bytes",
         f"; selected format: {selected_format}",
         "; packed4: short=durations 1/2/4/8, $FC note dur8, $FD note dur16lo dur16hi, $FF end",
         "; pair8: note,duration pairs, $FF end",
@@ -710,12 +882,20 @@ def main() -> int:
                         help="Simule 2 voix en alternant rapidement la melodie et une voix grave.")
     parser.add_argument("--pseudo-poly-step-units", type=int, default=2,
                         help="Duree de chaque alternance du mode pseudo-polyphonique.")
+    parser.add_argument("--x07-groove", action="store_true",
+                        help="Ajoute de courtes impulsions graves de basse et de percussions pour mieux passer sur le buzzer.")
+    parser.add_argument("--bass-pulse-units", type=int, default=2,
+                        help="Duree des impulsions de basse ajoutees en mode --x07-groove.")
+    parser.add_argument("--bass-gap-units", type=int, default=1,
+                        help="Petit silence insere apres chaque impulsion de basse pour mieux marquer le tempo.")
+    parser.add_argument("--drum-pulse-units", type=int, default=1,
+                        help="Duree des impulsions de percussion ajoutees en mode --x07-groove.")
     parser.add_argument("--track", type=int, action="append",
                         help="Ne garder que cette piste MIDI (index 0-based). Option repetable.")
     parser.add_argument("--channel", type=int, action="append",
                         help="Ne garder que ce canal MIDI (1..16). Option repetable.")
     parser.add_argument("--include-drums", action="store_true",
-                        help="Inclut le canal 10 (percussions), ignore par defaut.")
+                        help="Inclut le canal 10. Avec --x07-groove, le canal batterie est converti en impulsions simplifiees.")
     parser.add_argument("--priority", choices=("highest", "newest", "melody"), default="highest",
                         help="Strategie de reduction en monophonie.")
     parser.add_argument("--transpose", type=int,
@@ -729,8 +909,16 @@ def main() -> int:
     if args.unit_ms <= 0:
         print("Erreur: --unit-ms doit etre > 0.", file=sys.stderr)
         return 1
-    if args.smooth_units < 0 or args.max_note_units < 0 or args.retrigger_gap_units < 0 or args.pseudo_poly_step_units <= 0:
-        print("Erreur: --smooth-units, --max-note-units, --retrigger-gap-units doivent etre >= 0, et --pseudo-poly-step-units > 0.", file=sys.stderr)
+    if (
+        args.smooth_units < 0
+        or args.max_note_units < 0
+        or args.retrigger_gap_units < 0
+        or args.bass_pulse_units < 0
+        or args.bass_gap_units < 0
+        or args.drum_pulse_units < 0
+        or args.pseudo_poly_step_units <= 0
+    ):
+        print("Erreur: --smooth-units, --max-note-units, --retrigger-gap-units, --bass-pulse-units, --bass-gap-units et --drum-pulse-units doivent etre >= 0, et --pseudo-poly-step-units > 0.", file=sys.stderr)
         return 1
     if not X07_NOTE_MIN <= args.max_x07_note <= X07_NOTE_MAX:
         print(f"Erreur: --max-x07-note doit etre entre {X07_NOTE_MIN} et {X07_NOTE_MAX}.", file=sys.stderr)
@@ -750,10 +938,17 @@ def main() -> int:
         channel_filter = {channel - 1 for channel in args.channel}
         notes = [note for note in notes if note.channel in channel_filter]
 
-    if not args.include_drums:
-        notes = [note for note in notes if note.channel != 9]
+    drum_notes = [note for note in notes if note.channel == 9]
+    music_notes = [note for note in notes if note.channel != 9]
 
-    if not notes:
+    if args.x07_groove:
+        notes_for_mono = music_notes
+    elif args.include_drums:
+        notes_for_mono = notes
+    else:
+        notes_for_mono = music_notes
+
+    if not notes_for_mono:
         print("Aucune note exploitable apres filtrage.", file=sys.stderr)
         return 1
 
@@ -764,10 +959,10 @@ def main() -> int:
         return 1
 
     tempo_points, tempo_ticks = build_tempo_map(ticks_per_beat, tempo_events)
-    spans = reduce_to_mono(notes, ticks_per_beat, tempo_points, tempo_ticks, args.priority)
+    spans = reduce_to_mono(notes_for_mono, ticks_per_beat, tempo_points, tempo_ticks, args.priority)
 
     if args.transpose is None:
-        transpose = choose_auto_transpose([note.note for note in notes])
+        transpose = choose_auto_transpose([note.note for note in notes_for_mono])
     else:
         transpose = args.transpose
 
@@ -790,6 +985,34 @@ def main() -> int:
     if not events:
         print("La simplification a supprime tous les evenements musicaux.", file=sys.stderr)
         return 1
+
+    if args.x07_groove:
+        bass_pulses = build_bass_pulses(
+            notes=music_notes,
+            ticks_per_beat=ticks_per_beat,
+            tempo_points=tempo_points,
+            tempo_ticks=tempo_ticks,
+            unit_ms=args.unit_ms,
+            transpose=transpose,
+            fold_octaves=not args.no_fold_octaves,
+            bass_pulse_units=args.bass_pulse_units,
+        )
+        if bass_pulses:
+            events = overlay_pulses_staccato(events, bass_pulses, args.bass_gap_units)
+
+        if args.include_drums and drum_notes:
+            drum_pulses = build_drum_pulses(
+                notes=drum_notes,
+                ticks_per_beat=ticks_per_beat,
+                tempo_points=tempo_points,
+                tempo_ticks=tempo_ticks,
+                unit_ms=args.unit_ms,
+                drum_pulse_units=args.drum_pulse_units,
+            )
+            if drum_pulses:
+                events = overlay_pulses(events, drum_pulses)
+
+        events = merge_identical(events)
 
     pair_bytes = encode_pair8(events)
     packed_bytes = encode_packed4(events)
@@ -815,26 +1038,64 @@ def main() -> int:
         source_name=os.path.basename(args.input_midi),
         source_size=source_size,
         track_names=track_names,
-        kept_notes=len(notes),
+        kept_notes=len(notes_for_mono),
         events=events,
         transpose=transpose,
         max_x07_note=args.max_x07_note,
         smooth_units=args.smooth_units,
         pseudo_poly=args.pseudo_poly,
         pseudo_poly_step_units=args.pseudo_poly_step_units,
+        x07_groove=args.x07_groove,
+        bass_pulse_units=args.bass_pulse_units,
+        bass_gap_units=args.bass_gap_units,
+        drum_pulse_units=args.drum_pulse_units,
         selected_format=selected_format,
         pair_bytes=pair_bytes,
         packed_bytes=packed_bytes,
         unit_ms=args.unit_ms,
     )
-    size_text = f"{source_size} bytes"
+    body_lines = [f"{label}:"] + format_db_lines(payload)
+    payload_size = len(payload)
+    text_size = 0
+    size_text = f"{payload_size} bytes"
+    asm_text = ""
+
+    for _ in range(8):
+        max_display_name_len = min(30, max(1, 40 - len(size_text)))
+        display_name = sanitize_display_name(args.input_midi, max_display_name_len)
+        metadata_lines = build_metadata_lines(
+            selected_format,
+            args.unit_ms,
+            display_name,
+            source_size,
+            text_size,
+            payload_size,
+            size_text,
+        )
+        asm_lines = header_lines + metadata_lines + body_lines
+        asm_text = "\n".join(asm_lines) + "\n"
+        new_text_size = len(asm_text.encode("utf-8"))
+        if new_text_size == text_size:
+            text_size = new_text_size
+            break
+        text_size = new_text_size
+
     max_display_name_len = min(30, max(1, 40 - len(size_text)))
     display_name = sanitize_display_name(args.input_midi, max_display_name_len)
-    metadata_lines = build_metadata_lines(selected_format, args.unit_ms, display_name, source_size, size_text)
-    asm_lines = header_lines + metadata_lines + [f"{label}:"] + format_db_lines(payload)
+    metadata_lines = build_metadata_lines(
+        selected_format,
+        args.unit_ms,
+        display_name,
+        source_size,
+        text_size,
+        payload_size,
+        size_text,
+    )
+    asm_lines = header_lines + metadata_lines + body_lines
+    asm_text = "\n".join(asm_lines) + "\n"
 
     with open(output_path, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write("\n".join(asm_lines) + "\n")
+        handle.write(asm_text)
 
     if args.bin_output:
         with open(args.bin_output, "wb") as handle:
