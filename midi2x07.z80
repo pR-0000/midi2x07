@@ -1,0 +1,381 @@
+	include "canon_x07.inc"
+
+	.org $2000
+
+	jp start
+
+	include "music_data.inc"
+
+MUSIC_TEST_DATA		equ music_data
+MUSIC_MAX_CHUNK_UNITS	equ 255 / MUSIC_DATA_BEEP_TICKS
+
+	IF MUSIC_DATA_BEEP_TICKS <= 0
+		.error "MUSIC_DATA_BEEP_TICKS must be > 0"
+	ENDIF
+
+	IF MUSIC_DATA_BEEP_TICKS > 255
+		.error "MUSIC_DATA_BEEP_TICKS must be <= 255"
+	ENDIF
+
+	IF MUSIC_MAX_CHUNK_UNITS <= 0
+		.error "MUSIC_MAX_CHUNK_UNITS must be > 0"
+	ENDIF
+
+	IF MUSIC_DATA_FORMAT != MUSIC_FORMAT_PAIR8
+		IF MUSIC_DATA_FORMAT != MUSIC_FORMAT_PACKED4
+			.error "Unsupported MUSIC_DATA_FORMAT in music_data.inc"
+		ENDIF
+	ENDIF
+
+start:
+	call ROM_LCD_CLS
+	ld a,T6834_CMD_CLICK_OFF
+	call ROM_T6834_CMD
+	call music_abort_note
+	call music_draw_ui
+
+	xor a
+	ld (music_paused),a
+	ld (music_prev_f6),a
+	ld (music_prev_left),a
+	ld (music_note),a
+	ld hl,0
+	ld (music_remaining),hl
+	call music_draw_status_playing
+	call music_restart
+
+main:
+	call ROM_T6834_FLUSH
+	call music_poll_controls
+	ld a,(SYS_BREAKFLAG)
+	bit 0,a
+	jr nz,quit
+	ld a,(music_paused)
+	or a
+	jr nz,main
+	call music_update
+	jr main
+
+quit:
+	call music_silence
+	ld a,T6834_CMD_CLICK_ON
+	jp ROM_T6834_CMD
+
+music_draw_ui:
+	ld hl,msg_title
+	ld a,msg_title_len
+	ld e,1
+	call music_print_centered
+	ld hl,music_data_name
+	ld d,1
+	ld e,2
+	ld (SYS_CURSOR_XY),de
+	call ROM_MSG_DISPLAY_NOSTR
+	ld hl,music_data_size_text
+	ld a,21
+	sub MUSIC_DATA_SIZE_TEXT_LEN
+	ld d,a
+	ld e,3
+	ld (SYS_CURSOR_XY),de
+	jp ROM_MSG_DISPLAY_NOSTR
+
+music_print_centered:
+	ld d,a
+	ld a,22
+	sub d
+	srl a
+	ld d,a
+	ld (SYS_CURSOR_XY),de
+	jp ROM_MSG_DISPLAY_NOSTR
+
+music_draw_status_playing:
+	call music_clear_line_4
+	ld hl,msg_playing
+	ld a,msg_playing_len
+	ld e,4
+	jp music_print_centered
+
+music_draw_status_paused:
+	call music_clear_line_4
+	ld hl,msg_paused
+	ld a,msg_paused_len
+	ld e,4
+	jp music_print_centered
+
+music_clear_line_4:
+	ld a,T6834_CMD_LINE_CLEAR
+	ld hl,param_line_clear_4
+	ld bc,$0100
+	ld de,SYS_T6834_REPLYBUF
+	jp ROM_T6834_CMD_PARAM
+
+music_poll_controls:
+	call music_poll_f6
+	jp music_poll_left
+
+music_poll_f6:
+	ld a,T6834_CMD_TEST_KEY
+	ld hl,param_check_f6
+	ld bc,$0201
+	ld de,SYS_T6834_REPLYBUF
+	call ROM_T6834_CMD_PARAM
+	ld a,(SYS_T6834_REPLYBUF)
+	bit 5,a
+	jr z,music_poll_f6_released
+	ld a,(music_prev_f6)
+	or a
+	ret nz
+	ld a,1
+	ld (music_prev_f6),a
+	jp music_toggle_pause
+
+music_poll_f6_released:
+	xor a
+	ld (music_prev_f6),a
+	ret
+
+music_poll_left:
+	ld a,T6834_STICK_CMD
+	ld bc,$0001
+	ld de,SYS_T6834_REPLYBUF
+	call ROM_T6834_CMD_PARAM
+	ld a,(SYS_T6834_REPLYBUF)
+	cp T6834_STICK_LEFT
+	jr z,music_poll_left_pressed
+	xor a
+	ld (music_prev_left),a
+	ret
+
+music_poll_left_pressed:
+	ld a,(music_prev_left)
+	or a
+	ret nz
+	ld a,1
+	ld (music_prev_left),a
+	jp music_restart
+
+music_toggle_pause:
+	ld a,(music_paused)
+	or a
+	jr z,music_pause
+	xor a
+	ld (music_paused),a
+	call music_draw_status_playing
+	jp music_update
+
+music_pause:
+	ld a,1
+	ld (music_paused),a
+	call music_abort_note
+	jp music_draw_status_paused
+
+music_restart:
+	call music_abort_note
+	ld hl,MUSIC_TEST_DATA
+	ld (music_ptr),hl
+	ld (music_loop_ptr),hl
+	ld hl,0
+	ld (music_remaining),hl
+	xor a
+	ld (music_note),a
+	ld a,(music_paused)
+	or a
+	ret nz
+	jp music_update
+
+music_silence:
+	ld hl,0
+	ld ($000E),hl
+	ld a,T6834_CMD_BUZZER_OFF
+	jp ROM_T6834_CMD
+
+music_abort_note:
+	ld a,0
+	ld b,1
+	call x07_beep_wait
+	jp music_silence
+
+music_update:
+	ld hl,($000E)
+	ld a,h
+	or l
+	ret nz
+	ld hl,(music_remaining)
+	ld a,h
+	or l
+	jr nz,music_start_chunk
+	ld hl,(music_ptr)
+
+	IF MUSIC_DATA_FORMAT = MUSIC_FORMAT_PAIR8
+
+music_read_event:
+	ld a,(hl)
+	cp $FF
+	jr z,music_loop_restart
+	inc hl
+	ld e,(hl)
+	inc hl
+	ld d,0
+	ld (music_ptr),hl
+	jr music_store_event
+
+	ELSE
+
+music_read_event:
+	ld a,(hl)
+	inc hl
+	cp $FF
+	jr z,music_loop_restart
+	cp $FC
+	jr z,music_read_long8
+	cp $FD
+	jr z,music_read_long16
+
+	ld b,1
+	cp 49
+	jr c,music_short_done
+	sub 49
+	ld b,2
+	cp 49
+	jr c,music_short_done
+	sub 49
+	ld b,4
+	cp 49
+	jr c,music_short_done
+	sub 49
+	ld b,8
+
+music_short_done:
+	ld e,b
+	ld d,0
+	ld (music_ptr),hl
+	jr music_store_event
+
+music_read_long8:
+	ld a,(hl)
+	inc hl
+	ld e,(hl)
+	inc hl
+	ld d,0
+	ld (music_ptr),hl
+	jr music_store_event
+
+music_read_long16:
+	ld a,(hl)
+	inc hl
+	ld e,(hl)
+	inc hl
+	ld d,(hl)
+	inc hl
+	ld (music_ptr),hl
+	jr music_store_event
+
+	ENDIF
+
+music_loop_restart:
+	ld hl,(music_loop_ptr)
+	ld (music_ptr),hl
+	jr music_read_event
+
+music_store_event:
+	ld (music_note),a
+	ex de,hl
+	ld (music_remaining),hl
+
+music_start_chunk:
+	ld hl,(music_remaining)
+	ld a,h
+	or a
+	jr nz,music_chunk_max
+	ld a,l
+	cp MUSIC_MAX_CHUNK_UNITS
+	jr c,music_chunk_exact
+	jr z,music_chunk_exact
+
+music_chunk_max:
+	ld b,MUSIC_MAX_CHUNK_UNITS
+	jr music_chunk_have_size
+
+music_chunk_exact:
+	ld b,a
+
+music_chunk_have_size:
+	ld a,l
+	sub b
+	ld l,a
+	jr nc,music_chunk_store_remaining
+	dec h
+
+music_chunk_store_remaining:
+	ld (music_remaining),hl
+	ld a,b
+	ld c,a
+	ld b,MUSIC_DATA_BEEP_TICKS
+	xor a
+
+music_scale_chunk:
+	add a,c
+	djnz music_scale_chunk
+	ld b,a
+	ld a,(music_note)
+	jp x07_beep_async
+
+; ------------------------------------------------------------
+; A = note X-07 (0..48)
+; B = duration in 50 ms units
+; ------------------------------------------------------------
+x07_beep_async:
+	ld e,a
+	ld d,0
+	ld hl,x07_beep_async_resume
+	push hl
+	push de
+	pop iy
+	ld h,b
+	ld l,0
+	call ROM_BEEP
+
+x07_beep_async_resume:
+	ret
+
+x07_beep_wait:
+	call x07_beep_async
+
+x07_beep_wait_loop:
+	ld hl,($000E)
+	ld a,h
+	or l
+	jr nz,x07_beep_wait_loop
+	ret
+
+music_ptr:
+	.dw 0
+music_loop_ptr:
+	.dw 0
+music_remaining:
+	.dw 0
+music_note:
+	.db 0
+music_paused:
+	.db 0
+music_prev_f6:
+	.db 0
+music_prev_left:
+	.db 0
+
+param_check_f6:
+	.db $00,$20
+param_line_clear_4:
+	.db 3
+
+msg_title:
+	.db "midi2x07",0
+msg_title_len	equ 8
+msg_playing:
+	.db "- Playing -",0
+msg_playing_len	equ 11
+msg_paused:
+	.db "- Paused -",0
+msg_paused_len	equ 10
+
+end:
