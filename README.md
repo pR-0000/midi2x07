@@ -138,6 +138,7 @@ Commandes du lecteur :
 ### Référence des options
 
 - `input_midi` : fichier MIDI source à convertir.
+- `--list-tracks` : liste les pistes détectées avec leur index, leurs canaux, leur nombre de notes et leur plage de notes, puis quitte.
 - `-o`, `--output` : fichier ASM généré. Par défaut : `music_data.inc`.
 - `--bin-output` : export binaire brut optionnel du flux musical encodé.
 - `--format auto|pair8|packed4` : choisit le format de sortie. `auto` garde le plus compact.
@@ -147,7 +148,10 @@ Commandes du lecteur :
 - `--merge-gap-units` : fusionne `NOTE + petit silence + même NOTE`.
 - `--smooth-units` : lisse les micro-notes et micro-silences.
 - `--track` : conserve seulement certaines pistes MIDI. Option répétable.
+- `--prefer-track` : favorise certaines pistes MIDI quand plusieurs notes se chevauchent. Option répétable.
+- `--exclude-track` : exclut certaines pistes MIDI. Option répétable.
 - `--channel` : conserve seulement certains canaux MIDI. Option répétable.
+- `--exclude-channel` : exclut certains canaux MIDI. Option répétable.
 - `--include-drums` : inclut le canal batterie.
 - `--priority highest|newest|melody` : stratégie de réduction monophonique.
 - `--transpose` : transposition manuelle en demi-tons. Très utile si l’auto-transpose rend la musique trop aiguë.
@@ -168,6 +172,12 @@ Pour la liste complète :
 python midi2x07.py -h
 ```
 
+Pour lister les pistes d’un MIDI avant conversion :
+
+```powershell
+python midi2x07.py music.mid --list-tracks
+```
+
 ### Conseils pratiques
 
 - `unit_ms=50` est le meilleur point de départ avec `ROM_BEEP`
@@ -176,6 +186,8 @@ python midi2x07.py -h
 - `pair8` est meilleur pour inspecter rapidement le résultat
 - pour une musique plus agréable sur buzzer, il vaut souvent mieux limiter les notes trop aiguës
 - si le MIDI source est déjà grave, essaye `--transpose 0` avant de laisser l’auto-transpose choisir une valeur trop haute
+- pour retirer une basse trop dominante, il est souvent plus simple d’exclure sa piste avec `--exclude-track`
+- si tu veux seulement pousser un instrument principal devant les autres, essaye `--prefer-track` avant d’exclure des pistes
 - `--x07-groove` est utile quand un MIDI contient déjà une basse et une batterie, mais que la réduction monophonique pure donne un rendu trop aigu ou trop pauvre
 - avec `--x07-groove`, la ligne principale reste monophonique et le script réécrit seulement de très courtes impulsions graves de basse et de percussion
 - `--bass-gap-units 1` est un bon point de départ pour éviter que la basse ne se transforme en note continue
@@ -184,6 +196,18 @@ Exemple de commande orientée “buzzer agréable” :
 
 ```powershell
 python midi2x07.py music.mid --format auto --unit-ms 50 --priority melody --merge-gap-units 1 --smooth-units 1 --transpose 0 --max-x07-note 32 --x07-groove --include-drums
+```
+
+Exemple d’exclusion de basse :
+
+```powershell
+python midi2x07.py music.mid --format auto --unit-ms 50 --priority melody --merge-gap-units 1 --smooth-units 1 --transpose 0 --max-x07-note 24 --exclude-track 3
+```
+
+Exemple de priorité sur une piste :
+
+```powershell
+python midi2x07.py music.mid --format auto --unit-ms 50 --priority melody --merge-gap-units 1 --smooth-units 1 --transpose 0 --max-x07-note 24 --prefer-track 5
 ```
 
 ### Presets rapides
@@ -346,6 +370,7 @@ Player controls:
 ### Option reference
 
 - `input_midi`: source MIDI file to convert.
+- `--list-tracks`: list detected tracks with their index, channels, note count and note range, then exit.
 - `-o`, `--output`: generated ASM file. Default: `music_data.inc`.
 - `--bin-output`: optional raw binary export of the encoded music stream.
 - `--format auto|pair8|packed4`: output format. `auto` keeps the smallest one.
@@ -355,7 +380,10 @@ Player controls:
 - `--merge-gap-units`: merge `NOTE + short rest + same NOTE`.
 - `--smooth-units`: smooth very short notes and rests.
 - `--track`: keep only selected MIDI tracks. Repeatable.
+- `--prefer-track`: prefer selected MIDI tracks when several notes overlap. Repeatable.
+- `--exclude-track`: exclude selected MIDI tracks. Repeatable.
 - `--channel`: keep only selected MIDI channels. Repeatable.
+- `--exclude-channel`: exclude selected MIDI channels. Repeatable.
 - `--include-drums`: include the drum channel.
 - `--priority highest|newest|melody`: monophonic reduction strategy.
 - `--transpose`: manual transposition in semitones. Very useful when auto-transpose makes the result too bright.
@@ -376,6 +404,12 @@ For the full list:
 python midi2x07.py -h
 ```
 
+To list the tracks in a MIDI file before converting it:
+
+```powershell
+python midi2x07.py music.mid --list-tracks
+```
+
 ### Practical notes
 
 - `unit_ms=50` is the best starting point with `ROM_BEEP`
@@ -384,6 +418,8 @@ python midi2x07.py -h
 - `pair8` is better for quickly inspecting the result
 - to make buzzer playback more pleasant, it often helps to limit very high notes
 - if the source MIDI already sits in a low register, try `--transpose 0` before relying on auto-transpose
+- if the bass line dominates too much, excluding its track with `--exclude-track` is often the simplest fix
+- if you only want the lead instrument to win more often, try `--prefer-track` before excluding tracks entirely
 - `--x07-groove` is useful when a MIDI already contains bass and drums, but pure monophonic reduction sounds too thin or too shrill
 - with `--x07-groove`, the main line stays monophonic and the script only rewrites very short low bass and drum pulses
 - `--bass-gap-units 1` is a good starting point if the bass starts to feel too continuous
@@ -392,6 +428,18 @@ Example of a more buzzer-friendly conversion:
 
 ```powershell
 python midi2x07.py music.mid --format auto --unit-ms 50 --priority melody --merge-gap-units 1 --smooth-units 1 --transpose 0 --max-x07-note 32 --x07-groove --include-drums
+```
+
+Example without the bass track:
+
+```powershell
+python midi2x07.py music.mid --format auto --unit-ms 50 --priority melody --merge-gap-units 1 --smooth-units 1 --transpose 0 --max-x07-note 24 --exclude-track 3
+```
+
+Example with a preferred track:
+
+```powershell
+python midi2x07.py music.mid --format auto --unit-ms 50 --priority melody --merge-gap-units 1 --smooth-units 1 --transpose 0 --max-x07-note 24 --prefer-track 5
 ```
 
 ### Quick presets
